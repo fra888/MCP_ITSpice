@@ -15,17 +15,25 @@ A lightweight schematic capture and waveform viewer written in Rust (`egui`/`efr
   - Dedicated resizable workbench window for creating custom symbols with pins (preserving SPICE pin order), lines, rectangles, circles, and text.
   - Full `.asy` and `.sym.json` import/export, plus one-click placement onto the schematic.
 - **Waveform Viewer & Split Views**:
-  - Black (`#000000`) plot area with SI-formatted axes, dashed grid, multi-trace color legend, drag-box zoom (right-click to reset), and crosshair readout.
-  - Click any wire or component pin on the schematic after simulation to probe `V(node)` or `I(branch)`.
-  - Zoom-aware 1:1 sample rendering and min/max envelope decimation when zoomed out.
+  - Black (`#000000`) plot area with SI-formatted axes, dashed grid, multi-trace color legend, drag-box zoom, scroll-wheel zoom, and instantaneous hover readout.
+  - **Separated Voltage, Current & Power Probing**:
+    - **Select / Probe Voltage (`V`)**: Click any wire or net node to plot `V(node)`.
+    - **Probe Current (`I`)**: Click any component body or terminal pin to plot `I(r1)`, `I(c1)`, `I(l1)`, `I(d1)`, `I(v1)`, MOSFET `Id`/`Ig`/`Is`, BJT `Ic`/`Ib`/`Ie`, Op-Amp `I(u:pin)`, or custom subcircuit pin currents (using automatic `.save` directives and `0 V` series current-sense sources for subcircuits).
+    - **Power Probe (`Alt+Click`)**: Hold `Alt` and click any simulated component to compute and plot instantaneous power `P(comp)` in Watts (`W`).
+  - **Same-Graph Dual Y-Axis & Multi-Graph**: Traces share the same graph by default (with left `V` and right `A`/`W` Y-axes when mixed). Click **`+ Graph`** (or right-click → **New Graph**) to create additional stacked plot panes.
+  - **Interactive Cursors & Temporal Distance**: Click trace names in the legend or right-click on the plot (**Add Fixed Cursor**) to pin fixed cursors (`C1`, `C2`, `C3+`), drag them horizontally, and measure `Δt` / `1/Δt` (Hz) and `ΔV`/`ΔI` between `C1` and `C2` (`Esc` clears cursors).
   - **Horizontal (`Split H`)** and **Vertical (`Split V`)** split views with draggable splitters and `-` / `+` pane size controls.
+- **Python Analysis Terminal (`🐍 Python` Tab)**:
+  - Dedicated interactive `python3` REPL tab connected to your system Python (or a configurable Python/virtualenv path in **File → Settings...**).
+  - Automatically syncs simulation data (`x`, `x_name`, `traces`, `netlist`) and provides helpers: `tr(name)`, `rms(s)`, `avg(s)`, `pp(s)`, `info()`, `reload()`.
+  - Write computed waveforms directly back to the viewer: `plot(name, y)` updates the integrated graph, while `new_plot(name, y)` / `new_graph()` creates a new plot pane.
 - **SPICE Configuration Dialogs**:
   - **Independent Voltage / Current Source**: `(none)`, `PULSE`, `SINE`, `EXP`, `SFFM`, `PWL`, `PWL FILE`, DC value, Small-signal AC, and Parasitic properties.
   - **Capacitor Properties**: Manufacturer/Part/Type metadata, Capacitance, Voltage/RMS Current ratings, ESR, ESL, Rpar, Cpar, and built-in capacitor preset library.
   - **MOSFET Properties**: Model name, Manufacturer, Polarity (`N-chan`/`P-chan`), Vds, Rds(on), Qgate, and built-in NMOS/PMOS preset library.
   - **Configure Analysis**: `Transient`, `AC Analysis`, `DC sweep`, `Noise`, `DC Transfer`, and `DC op pnt` with live SPICE command preview.
-- **`ngspice` Integration & Model Folders (`File -> Settings...`)**:
-  - Configurable `ngspice` executable or `libngspice.so.0` shared library path (with auto-detection).
+- **`ngspice` & Python Integration (`File -> Settings...`)**:
+  - Configurable `ngspice` executable or `libngspice.so.0` shared library path and configurable `python3` / virtualenv executable path (with auto-detection and file browser).
   - Configurable `ngspice` default model folders and user model folders (searched first), automatically indexing `.model` and `.subckt` definitions across `.lib`, `.mod`, `.mdl`, `.sub`, `.cir`, `.sp`, `.inc`, and `.txt` files.
   - Non-blocking background simulation execution, netlist viewer, and `ngspice` output log viewer.
 - **Built-in MCP Server (`--mcp`)**:
@@ -89,6 +97,9 @@ cargo test
 | Key | Action |
 | --- | --- |
 | `W` | Draw Wire |
+| `V` | Select / Probe Voltage (`V(node)`) |
+| `I` | Probe Current (`I(comp)` / `Id` / `Ic` / pin currents) |
+| `Alt+Click` | Compute & probe component instantaneous power (`P(comp)`) |
 | `G` | Place Ground (`0`) |
 | `R` | Place Resistor |
 | `C` | Place Capacitor |
@@ -139,10 +150,12 @@ MCP_ITSpice includes a built-in MCP server (`MCP_ITSpice`) that allows AI assist
 - `src/ngspice.rs` — `libloading` FFI wrapper for `libngspice.so.0` and `ngspice` CLI runner
 - `src/settings.rs` — Persistent `ngspice` executable and default/user model folder indexing
 - `src/schematic_ui.rs` — Interactive schematic canvas, component symbols, marquee selection, label dragging, and clipboard
-- `src/waveform_ui.rs` — Black-background waveform plotter with zoom, crosshair, and SI formatting
+- `src/waveform_ui.rs` — Black-background waveform plotter with dual Y-axes, multi-graph panes, fixed cursors, `Δt` readout, and SI formatting
+- `src/python_terminal.rs` — Interactive system Python (`python3`) analysis REPL tab with simulation sync and `plot()` / `new_plot()` waveform export
 - `src/symbol_editor.rs` — Resizable Symbol Workbench with `.asy` / `.sym.json` support
 - `src/source_dialog.rs` — Independent Voltage/Current Source configuration dialog
-- `src/capacitor_dialog.rs` — Capacitor Properties dialog and preset library
+- `src/capacitor_dialog.rs` — Capacitor Properties dialog and ngspice library/parametric configuration
+- `src/resistor_dialog.rs` — Resistor Properties dialog and ngspice library/parametric configuration
 - `src/mosfet_dialog.rs` — MOSFET Properties dialog and preset library
 - `src/analysis_dialog.rs` — Configure Analysis (`.tran`, `.ac`, `.dc`, `.noise`, `.tf`, `.op`) dialog
 - `src/icons.rs` — Vector toolbar icons and window icon

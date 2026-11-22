@@ -6,6 +6,7 @@ mod mcp;
 mod model;
 mod mosfet_dialog;
 mod ngspice;
+mod python_terminal;
 mod resistor_dialog;
 mod schematic_ui;
 mod settings;

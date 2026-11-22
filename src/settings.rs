@@ -7,8 +7,18 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct AppSettings {
     pub ngspice_executable: String,
+    pub python_executable: String,
     pub ngspice_default_dirs: Vec<String>,
     pub user_model_dirs: Vec<String>,
+}
+
+pub fn detect_python_path() -> String {
+    for candidate in ["/usr/bin/python3", "/usr/local/bin/python3"] {
+        if Path::new(candidate).is_file() {
+            return candidate.to_string();
+        }
+    }
+    "python3".to_string()
 }
 
 pub fn detect_ngspice_path() -> String {
@@ -56,6 +66,7 @@ impl Default for AppSettings {
 
         Self {
             ngspice_executable: detect_ngspice_path(),
+            python_executable: detect_python_path(),
             ngspice_default_dirs,
             user_model_dirs,
         }

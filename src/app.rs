@@ -13,9 +13,10 @@ use crate::mcp::McpSharedState;
 use crate::model::{ComponentKind, NetlistResult, Schematic};
 use crate::mosfet_dialog::MosfetDialogState;
 use crate::ngspice::{run_simulation_with_settings, SimulationResult};
+use crate::python_terminal::{draw_python_terminal, PythonTerminalState};
 use crate::resistor_dialog::{ResistorDialogAction, ResistorDialogState};
 use crate::schematic_ui::{draw_schematic_pane, EditorTool, SchematicAction, SchematicViewState};
-use crate::settings::{detect_ngspice_path, AppSettings, ModelIndex};
+use crate::settings::{detect_ngspice_path, detect_python_path, AppSettings, ModelIndex};
 use crate::source_dialog::SourceDialogState;
 use crate::symbol_editor::{CustomSymbol, SymbolEditorAction, SymbolEditorState};
 use crate::waveform_ui::{draw_waveform_pane, WaveformViewState};
@@ -26,6 +27,7 @@ enum LayoutMode {
     SplitVertical,
     SchematicOnly,
     WaveformOnly,
+    PythonTerminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +88,7 @@ pub struct ItSpiceApp {
     show_log_window: bool,
     show_add_trace_window: bool,
     show_settings_window: bool,
+    python_terminal: PythonTerminalState,
     settings: AppSettings,
     model_index: ModelIndex,
     symbol_editor: SymbolEditorState,
@@ -138,6 +141,11 @@ impl ItSpiceApp {
             show_log_window: false,
             show_add_trace_window: false,
             show_settings_window: false,
+            python_terminal: {
+                let mut pt = PythonTerminalState::default();
+                pt.python_exe = settings.python_executable.clone();
+                pt
+            },
             settings,
             model_index,
             symbol_editor: SymbolEditorState::default(),
@@ -375,6 +383,11 @@ impl eframe::App for ItSpiceApp {
                         .unwrap_or_else(|| "Simulation failed".into());
                 }
                 self.sim_result = Some(res);
+                if self.python_terminal.is_running() {
+                    self.python_terminal
+                        .sync_sim_data(self.sim_result.as_ref(), &self.netlist);
+                    self.python_terminal.send_command("reload()", false);
+                }
             } else {
                 ctx.request_repaint();
             }
@@ -476,6 +489,16 @@ impl eframe::App for ItSpiceApp {
                         self.show_add_trace_window = true;
                         ui.close_menu();
                     }
+                    ui.separator();
+                    let py_label = if self.layout_mode == LayoutMode::PythonTerminal {
+                        "✓ Python Analysis Terminal"
+                    } else {
+                        "Python Analysis Terminal"
+                    };
+                    if ui.button(py_label).clicked() {
+                        self.layout_mode = LayoutMode::PythonTerminal;
+                        ui.close_menu();
+                    }
                 });
 
                 ui.menu_button("Simulate", |ui| {
@@ -504,6 +527,10 @@ impl eframe::App for ItSpiceApp {
                     }
                     if ui.button("Waveform Only").clicked() {
                         self.layout_mode = LayoutMode::WaveformOnly;
+                        ui.close_menu();
+                    }
+                    if ui.button("Python Terminal").clicked() {
+                        self.layout_mode = LayoutMode::PythonTerminal;
                         ui.close_menu();
                     }
                     ui.separator();
@@ -820,6 +847,15 @@ impl eframe::App for ItSpiceApp {
                 {
                     self.layout_mode = LayoutMode::SplitVertical;
                 }
+                if ui
+                    .selectable_label(
+                        self.layout_mode == LayoutMode::PythonTerminal,
+                        "🐍 Python",
+                    )
+                    .clicked()
+                {
+                    self.layout_mode = LayoutMode::PythonTerminal;
+                }
                 if matches!(
                     self.layout_mode,
                     LayoutMode::SplitHorizontal | LayoutMode::SplitVertical
@@ -871,6 +907,17 @@ impl eframe::App for ItSpiceApp {
                     };
                     ui.label(RichText::new(format!("Click to probe {probe}")).color(color));
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let is_py = self.layout_mode == LayoutMode::PythonTerminal;
+                    let btn_txt = if is_py { "Py Terminal (Tab)" } else { "Py Terminal" };
+                    if ui.small_button(btn_txt).clicked() {
+                        self.layout_mode = if is_py {
+                            LayoutMode::SplitHorizontal
+                        } else {
+                            LayoutMode::PythonTerminal
+                        };
+                    }
+                });
             });
         });
 
@@ -880,6 +927,73 @@ impl eframe::App for ItSpiceApp {
             .show(ctx, |ui| {
                 let total_rect = ui.available_rect_before_wrap();
                 match self.layout_mode {
+                    LayoutMode::PythonTerminal => {
+                        let new_waves = egui::Frame::none()
+                            .inner_margin(8.0)
+                            .show(ui, |ui| {
+                                draw_python_terminal(
+                                    ui,
+                                    &mut self.python_terminal,
+                                    self.sim_result.as_ref(),
+                                    &self.netlist,
+                                )
+                            })
+                            .inner;
+                        for cmd in new_waves {
+                            if cmd.new_graph {
+                                self.waveform_view.add_graph();
+                            }
+                            if cmd.name.is_empty() {
+                                self.status_msg = "Created new waveform plot from Python".into();
+                                continue;
+                            }
+                            let w_name = cmd.name;
+                            let w_vals = cmd.y;
+                            if let Some(sim) = self.sim_result.as_mut() {
+                                sim.traces.insert(
+                                    w_name.clone(),
+                                    crate::ngspice::TraceData {
+                                        name: w_name.clone(),
+                                        real: w_vals,
+                                        imag: None,
+                                    },
+                                );
+                            } else {
+                                let mut traces = std::collections::HashMap::new();
+                                let n = w_vals.len();
+                                traces.insert(
+                                    w_name.clone(),
+                                    crate::ngspice::TraceData {
+                                        name: w_name.clone(),
+                                        real: w_vals,
+                                        imag: None,
+                                    },
+                                );
+                                self.sim_result = Some(SimulationResult {
+                                    plot_name: "python".to_string(),
+                                    x_name: "index".to_string(),
+                                    x_values: (0..n).map(|i| i as f64).collect(),
+                                    traces,
+                                    log: Vec::new(),
+                                    success: true,
+                                    error: None,
+                                });
+                            }
+                            let target = if self.waveform_view.focused_graph > 0
+                                && self.waveform_view.focused_graph
+                                    <= self.waveform_view.extra_graphs.len()
+                            {
+                                &mut self.waveform_view.extra_graphs
+                                    [self.waveform_view.focused_graph - 1]
+                            } else {
+                                &mut self.waveform_view.active_traces
+                            };
+                            if !target.contains(&w_name) {
+                                target.push(w_name.clone());
+                            }
+                            self.status_msg = format!("Added waveform '{w_name}' from Python");
+                        }
+                    }
                     LayoutMode::WaveformOnly => {
                         self.active_pane = ActivePane::Waveform;
                         draw_waveform_pane(
@@ -1604,6 +1718,25 @@ impl ItSpiceApp {
 
                     ui.add_space(10.0);
                     ui.separator();
+                    ui.heading("Python Executable Path");
+                    ui.label("Path to python3 binary or virtualenv python (e.g. /path/to/venv/bin/python):");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.settings.python_executable)
+                                .desired_width(340.0),
+                        );
+                        if ui.button("Browse...").clicked() {
+                            if let Some(file) = rfd::FileDialog::new().pick_file() {
+                                self.settings.python_executable = file.display().to_string();
+                            }
+                        }
+                        if ui.button("Auto-Detect").clicked() {
+                            self.settings.python_executable = detect_python_path();
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.separator();
                     ui.heading("ngspice Default Model Folders");
                     ui.label("Built-in / system ngspice library directories:");
                     let mut remove_def: Option<usize> = None;
@@ -1696,11 +1829,19 @@ impl ItSpiceApp {
                         }
                         if ui.button("Restore Defaults").clicked() {
                             self.settings = AppSettings::default();
+                            self.python_terminal.python_exe =
+                                self.settings.python_executable.clone();
+                            self.python_terminal.stop();
                             self.model_index =
                                 ModelIndex::scan(&self.settings.all_model_dirs());
                             self.refresh_netlist();
                         }
                         if ui.button("Save & Close").clicked() {
+                            if self.python_terminal.python_exe != self.settings.python_executable {
+                                self.python_terminal.python_exe =
+                                    self.settings.python_executable.clone();
+                                self.python_terminal.stop();
+                            }
                             self.model_index =
                                 ModelIndex::scan(&self.settings.all_model_dirs());
                             if let Err(e) = self.settings.save() {
