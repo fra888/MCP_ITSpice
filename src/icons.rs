@@ -25,6 +25,7 @@ pub enum ToolbarIcon {
     Directive,
     ConfigureAnalysis,
     Move,
+    Drag,
     Delete,
     Undo,
     Redo,
@@ -326,6 +327,20 @@ fn draw_icon(painter: &egui::Painter, r: Rect, icon: ToolbarIcon, enabled: bool)
             let st = Stroke::new(1.6_f32, dark);
             painter.line_segment([Pos2::new(r.left() + 2.0, c.y), Pos2::new(r.right() - 2.0, c.y)], st);
             painter.line_segment([Pos2::new(c.x, r.top() + 2.0), Pos2::new(c.x, r.bottom() - 2.0)], st);
+        }
+        ToolbarIcon::Drag => {
+            // Hand/box drag with connected orthogonal wires
+            let st_wire = Stroke::new(1.5_f32, blue);
+            let st_box = Stroke::new(1.5_f32, dark);
+            painter.line_segment([Pos2::new(r.left() + 1.5, c.y), Pos2::new(c.x - 4.0, c.y)], st_wire);
+            painter.line_segment([Pos2::new(c.x + 4.0, c.y), Pos2::new(r.right() - 1.5, c.y)], st_wire);
+            painter.rect_stroke(
+                Rect::from_center_size(c, Vec2::splat(8.0)),
+                1.0,
+                st_box,
+            );
+            painter.line_segment([Pos2::new(c.x - 2.5, c.y), Pos2::new(c.x + 2.5, c.y)], st_box);
+            painter.line_segment([Pos2::new(c.x, c.y - 2.5), Pos2::new(c.x, c.y + 2.5)], st_box);
         }
         ToolbarIcon::Delete => {
             let st = Stroke::new(2.0_f32, red);

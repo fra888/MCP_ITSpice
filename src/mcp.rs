@@ -4,12 +4,15 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::model::{ComponentKind, Schematic};
-use crate::ngspice::{run_simulation_with_settings, SimulationResult};
+use crate::ngspice::{run_simulation_with_settings, SimulationResult, TraceData};
+use crate::python_terminal::{PyPlotCommand, PythonTerminalState};
 use crate::settings::{AppSettings, ModelIndex};
 
 pub struct McpSharedState {
     pub schematic: Schematic,
     pub last_sim: Option<SimulationResult>,
+    pub gui_python_log: Vec<String>,
+    pub pending_plot_cmds: Vec<PyPlotCommand>,
     pub revision: u64,
     pub zoom_fit_requested: bool,
     pub egui_ctx: Option<egui::Context>,
@@ -20,6 +23,8 @@ impl McpSharedState {
         Self {
             schematic: Schematic::default_ltspice_demo(),
             last_sim: None,
+            gui_python_log: Vec::new(),
+            pending_plot_cmds: Vec::new(),
             revision: 0,
             zoom_fit_requested: false,
             egui_ctx: None,
@@ -36,17 +41,25 @@ impl McpSharedState {
 
 pub struct McpServer {
     shared: Arc<Mutex<McpSharedState>>,
+    python: PythonTerminalState,
 }
 
 impl McpServer {
     pub fn new() -> Self {
+        let settings = AppSettings::load();
+        let mut python = PythonTerminalState::default();
+        python.python_exe = settings.python_executable;
         Self {
             shared: Arc::new(Mutex::new(McpSharedState::new())),
+            python,
         }
     }
 
     pub fn with_shared(shared: Arc<Mutex<McpSharedState>>) -> Self {
-        Self { shared }
+        let settings = AppSettings::load();
+        let mut python = PythonTerminalState::default();
+        python.python_exe = settings.python_executable;
+        Self { shared, python }
     }
 
     pub fn run_stdio(&mut self) -> io::Result<()> {
@@ -401,6 +414,51 @@ impl McpServer {
                 });
                 (serde_json::to_string_pretty(&out).unwrap_or_default(), false)
             }
+            "python_exec" => {
+                let Some(code) = args.get("code").and_then(|v| v.as_str()) else {
+                    return ("Missing required argument: code".into(), true);
+                };
+                let net = st.schematic.to_spice_netlist();
+                let sim_clone = st.last_sim.clone();
+                drop(st);
+                self.run_python_and_sync(code, sim_clone.as_ref(), &net)
+            }
+            "python_run_script" => {
+                let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+                    return ("Missing required argument: path".into(), true);
+                };
+                let path_json = serde_json::to_string(path).unwrap_or_else(|_| "\"\"".to_string());
+                let code = format!("run_script({path_json})");
+                let net = st.schematic.to_spice_netlist();
+                let sim_clone = st.last_sim.clone();
+                drop(st);
+                self.run_python_and_sync(&code, sim_clone.as_ref(), &net)
+            }
+            "get_python_output" => {
+                let tail = args
+                    .get("tail")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(50)
+                    .clamp(1, 500) as usize;
+                let lines: Vec<String> = st
+                    .gui_python_log
+                    .iter()
+                    .rev()
+                    .take(tail)
+                    .rev()
+                    .cloned()
+                    .collect();
+                let trace_names: Vec<String> = st
+                    .last_sim
+                    .as_ref()
+                    .map(|s| s.traces.keys().cloned().collect())
+                    .unwrap_or_default();
+                let out = json!({
+                    "gui_python_log": lines,
+                    "available_traces": trace_names,
+                });
+                (serde_json::to_string_pretty(&out).unwrap_or_default(), false)
+            }
             _ => (format!("Unknown tool: {name}"), true),
         }
     }
@@ -451,6 +509,63 @@ impl McpServer {
         st.last_sim = Some(res);
         st.revision += 1;
         (serde_json::to_string_pretty(&payload).unwrap_or_default(), false)
+    }
+
+    fn run_python_and_sync(
+        &mut self,
+        code: &str,
+        sim: Option<&SimulationResult>,
+        net: &crate::model::NetlistResult,
+    ) -> (String, bool) {
+        let (stdout, stderr, had_error, plots) = self.python.execute_blocking(code, sim, net);
+        let mut added_traces = Vec::new();
+        if !plots.is_empty() {
+            let mut st = self.shared.lock().unwrap();
+            for cmd in plots {
+                st.pending_plot_cmds.push(cmd.clone());
+                if cmd.name.is_empty() {
+                    continue;
+                }
+                added_traces.push(cmd.name.clone());
+                if let Some(sim_res) = st.last_sim.as_mut() {
+                    sim_res.traces.insert(
+                        cmd.name.clone(),
+                        TraceData {
+                            name: cmd.name,
+                            real: cmd.y,
+                            imag: None,
+                        },
+                    );
+                } else {
+                    let n = cmd.y.len();
+                    let mut traces = std::collections::HashMap::new();
+                    traces.insert(
+                        cmd.name.clone(),
+                        TraceData {
+                            name: cmd.name,
+                            real: cmd.y,
+                            imag: None,
+                        },
+                    );
+                    st.last_sim = Some(SimulationResult {
+                        plot_name: "python".to_string(),
+                        x_name: "index".to_string(),
+                        x_values: (0..n).map(|i| i as f64).collect(),
+                        traces,
+                        log: Vec::new(),
+                        success: true,
+                        error: None,
+                    });
+                }
+            }
+            st.notify_gui();
+        }
+        let out = json!({
+            "stdout": stdout,
+            "stderr": stderr,
+            "added_traces": added_traces,
+        });
+        (serde_json::to_string_pretty(&out).unwrap_or_default(), had_error)
     }
 }
 
@@ -617,6 +732,38 @@ fn tool_definitions() -> Value {
                 },
                 "required": ["trace"]
             }
+        },
+        {
+            "name": "python_exec",
+            "description": "Execute Python code in the persistent MCP_ITSpice Python analysis session (with x, traces, tr(), rms(), avg(), pp(), plot(), new_plot(), info(), reload()).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "code": { "type": "string", "description": "Python expression or statements to execute" }
+                },
+                "required": ["code"]
+            }
+        },
+        {
+            "name": "python_run_script",
+            "description": "Load and execute a .py analysis script file in the persistent MCP_ITSpice Python session.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to the .py script file" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "get_python_output",
+            "description": "Read recent output lines from the GUI Python Analysis Terminal and list all available simulation/Python traces.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tail": { "type": "integer", "description": "Number of recent log lines to return (default 50)" }
+                }
+            }
         }
     ])
 }
@@ -661,5 +808,20 @@ mod tests {
         assert_eq!(sim["result"]["isError"], false);
         let text = sim["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("\"success\": true"));
+
+        let py = srv
+            .handle_message(&json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "python_exec",
+                    "arguments": { "code": "round(rms(tr('V(out)')), 3)" }
+                }
+            }))
+            .unwrap();
+        assert_eq!(py["result"]["isError"], false, "python_exec failed: {py:?}");
+        let py_text = py["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(py_text.contains("\"stdout\""), "expected stdout in {py_text}");
     }
 }

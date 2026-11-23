@@ -44,10 +44,19 @@ pub fn trace_unit(name: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GraphXAxis {
+    pub x_values: Vec<f64>,
+    pub x_unit: String,
+    pub y_unit: Option<String>,
+    pub x_range: Option<(f64, f64)>,
+}
+
 pub struct WaveformViewState {
     pub active_traces: Vec<String>,
     pub extra_graphs: Vec<Vec<String>>,
     pub focused_graph: usize,
+    pub graph_x_overrides: std::collections::HashMap<usize, GraphXAxis>,
     pub x_range: Option<(f64, f64)>,
     pub y_range: Option<(f64, f64)>,
     pub y_range_i: Option<(f64, f64)>,
@@ -63,6 +72,7 @@ impl Default for WaveformViewState {
             active_traces: Vec::new(),
             extra_graphs: Vec::new(),
             focused_graph: 0,
+            graph_x_overrides: std::collections::HashMap::new(),
             x_range: None,
             y_range: None,
             y_range_i: None,
@@ -79,6 +89,27 @@ impl WaveformViewState {
         self.x_range = None;
         self.y_range = None;
         self.y_range_i = None;
+        for gx in self.graph_x_overrides.values_mut() {
+            gx.x_range = None;
+        }
+    }
+
+    pub fn set_graph_xaxis(
+        &mut self,
+        graph_idx: usize,
+        x_values: Vec<f64>,
+        x_unit: String,
+        y_unit: Option<String>,
+    ) {
+        self.graph_x_overrides.insert(
+            graph_idx,
+            GraphXAxis {
+                x_values,
+                x_unit,
+                y_unit,
+                x_range: None,
+            },
+        );
     }
 
     pub fn add_graph(&mut self) {
@@ -251,7 +282,11 @@ pub fn draw_waveform_pane(
     // Build list of graphs: Graph 0 is always present (same graph for V & I by default),
     // plus any user-generated extra_graphs stacked below.
     let num_graphs = 1 + view.extra_graphs.len();
-    let gap = 22.0_f32;
+    let gap = if view.graph_x_overrides.is_empty() {
+        22.0_f32
+    } else {
+        36.0_f32
+    };
     let total_gap = gap * (num_graphs.saturating_sub(1) as f32);
     let graph_h = ((plot_rect.height() - total_gap) / num_graphs as f32).max(24.0);
 
@@ -357,6 +392,15 @@ pub fn draw_waveform_pane(
     if let Some(eg_idx) = close_extra_graph {
         if eg_idx < view.extra_graphs.len() {
             view.extra_graphs.remove(eg_idx);
+            let closed_g = eg_idx + 1;
+            let old_overrides = std::mem::take(&mut view.graph_x_overrides);
+            for (k, v) in old_overrides {
+                if k < closed_g {
+                    view.graph_x_overrides.insert(k, v);
+                } else if k > closed_g {
+                    view.graph_x_overrides.insert(k - 1, v);
+                }
+            }
             if view.focused_graph > view.extra_graphs.len() {
                 view.focused_graph = view.extra_graphs.len();
             }
@@ -378,8 +422,10 @@ pub fn draw_waveform_pane(
         }
     }
 
-    // Draw each graph (same graph for V & I with dual Y-axes when both V and I are present)
+    // Draw each graph (same graph for V & I with dual Y-axes; supports per-graph X-axis & unit overrides)
     let mut graph_y_bounds: Vec<(Option<(f64, f64)>, Option<(f64, f64)>)> =
+        Vec::with_capacity(num_graphs);
+    let mut graph_x_meta: Vec<(f64, f64, String, Option<String>)> =
         Vec::with_capacity(num_graphs);
     for g_idx in 0..num_graphs {
         let g_rect = graph_rects[g_idx];
@@ -388,6 +434,40 @@ pub fn draw_waveform_pane(
         } else {
             &view.extra_graphs[g_idx - 1]
         };
+        let (g_x_vals, g_x_min, g_x_max, g_x_unit, g_y_unit_ov): (
+            &[f64],
+            f64,
+            f64,
+            String,
+            Option<String>,
+        ) = if let Some(gx) = view.graph_x_overrides.get(&g_idx) {
+            if !gx.x_values.is_empty() {
+                let lo = gx
+                    .x_values
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min);
+                let hi = gx
+                    .x_values
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let (xm0, xm1) = gx.x_range.unwrap_or((lo, hi));
+                (
+                    gx.x_values.as_slice(),
+                    xm0,
+                    xm1,
+                    gx.x_unit.clone(),
+                    gx.y_unit.clone(),
+                )
+            } else {
+                (&sim.x_values, x_min, x_max, gx.x_unit.clone(), gx.y_unit.clone())
+            }
+        } else {
+            (&sim.x_values, x_min, x_max, x_unit.to_string(), None)
+        };
+        let g_x_span = (g_x_max - g_x_min).max(1e-15);
+
         let v_tr: Vec<(usize, String)> = g_traces
             .iter()
             .enumerate()
@@ -403,7 +483,7 @@ pub fn draw_waveform_pane(
 
         let v_bounds = if !v_tr.is_empty() || i_tr.is_empty() {
             let y_override = if g_idx == 0 { view.y_range } else { None };
-            Some(compute_y_bounds(sim, &v_tr, x_min, x_max, y_override))
+            Some(compute_y_bounds(sim, g_x_vals, &v_tr, g_x_min, g_x_max, y_override))
         } else {
             None
         };
@@ -413,26 +493,33 @@ pub fn draw_waveform_pane(
             } else {
                 None
             };
-            Some(compute_y_bounds(sim, &i_tr, x_min, x_max, y_override))
+            Some(compute_y_bounds(sim, g_x_vals, &i_tr, g_x_min, g_x_max, y_override))
         } else {
             None
         };
+
+        let draw_x_labels = g_idx + 1 == num_graphs
+            || view.graph_x_overrides.contains_key(&g_idx)
+            || view.graph_x_overrides.contains_key(&(g_idx + 1));
 
         draw_dual_axis_graph(
             &painter,
             g_rect,
             sim,
+            g_x_vals,
             &v_tr,
             &i_tr,
-            x_min,
-            x_span,
-            x_unit,
+            g_x_min,
+            g_x_span,
+            &g_x_unit,
+            g_y_unit_ov.as_deref(),
             v_bounds,
             i_bounds,
-            g_idx + 1 == num_graphs,
+            draw_x_labels,
             num_graphs > 1 && view.focused_graph == g_idx,
         );
         graph_y_bounds.push((v_bounds, i_bounds));
+        graph_x_meta.push((g_x_min, g_x_span, g_x_unit, g_y_unit_ov));
     }
 
     let (y_min, y_max) = graph_y_bounds[0]
@@ -847,31 +934,47 @@ pub fn draw_waveform_pane(
         }
     }
 
-    // Hover crosshair & instantaneous trace value readout
+    // Hover crosshair & instantaneous trace value readout (per-graph X-axis & units aware)
     if let Some(pos) = response.hover_pos() {
         if plot_rect.contains(pos) && view.drag_start.is_none() && view.dragging_cursor.is_none() {
-            let xf = ((pos.x - plot_rect.left()) / plot_rect.width()) as f64;
-            let xv = x_min + xf * x_span;
+            let hovered_g = graph_rects
+                .iter()
+                .position(|gr| gr.contains(pos))
+                .unwrap_or(0);
+            let h_rect = graph_rects[hovered_g];
+            let (hx_min, hx_span, ref hx_unit, ref hy_unit_ov) = graph_x_meta[hovered_g];
+            let hx_vals: &[f64] = view
+                .graph_x_overrides
+                .get(&hovered_g)
+                .filter(|gx| !gx.x_values.is_empty())
+                .map(|gx| gx.x_values.as_slice())
+                .unwrap_or(&sim.x_values);
+            let h_traces = if hovered_g == 0 {
+                &view.active_traces
+            } else {
+                &view.extra_graphs[hovered_g - 1]
+            };
+
+            let xf = ((pos.x - h_rect.left()) / h_rect.width()).clamp(0.0, 1.0) as f64;
+            let xv = hx_min + xf * hx_span;
 
             let cross_color = Color32::from_rgba_unmultiplied(180, 180, 180, 90);
             painter.line_segment(
                 [
-                    Pos2::new(pos.x, plot_rect.top()),
-                    Pos2::new(pos.x, plot_rect.bottom()),
+                    Pos2::new(pos.x, h_rect.top()),
+                    Pos2::new(pos.x, h_rect.bottom()),
                 ],
-                Stroke::new(1.0, cross_color),
+                Stroke::new(1.0_f32, cross_color),
             );
-            let mut readout = format!("x = {}", format_si_precise(xv, x_unit));
-            for tr_name in &view.active_traces {
-                if let Some(yv) = sample_trace_at(sim, tr_name, xv) {
-                    readout.push_str(&format!(
-                        "  |  {tr_name} = {}",
-                        format_si_precise(yv, trace_unit(tr_name))
-                    ));
+            let mut readout = format!("x = {}", format_si_precise(xv, hx_unit));
+            for tr_name in h_traces {
+                if let Some(yv) = sample_trace_at_x(sim, hx_vals, tr_name, xv) {
+                    let u = hy_unit_ov.as_deref().unwrap_or_else(|| trace_unit(tr_name));
+                    readout.push_str(&format!("  |  {tr_name} = {}", format_si_precise(yv, u)));
                 }
             }
             painter.text(
-                Pos2::new(plot_rect.right() - 6.0, plot_rect.top() + 6.0),
+                Pos2::new(h_rect.right() - 6.0, h_rect.top() + 6.0),
                 egui::Align2::RIGHT_TOP,
                 readout,
                 FontId::monospace(11.0),
@@ -884,20 +987,29 @@ pub fn draw_waveform_pane(
 }
 
 fn sample_trace_at(sim: &SimulationResult, trace_name: &str, x: f64) -> Option<f64> {
+    sample_trace_at_x(sim, &sim.x_values, trace_name, x)
+}
+
+fn sample_trace_at_x(
+    sim: &SimulationResult,
+    x_values: &[f64],
+    trace_name: &str,
+    x: f64,
+) -> Option<f64> {
     let tr = sim.traces.get(trace_name)?;
-    let n = sim.x_values.len().min(tr.real.len());
+    let n = x_values.len().min(tr.real.len());
     if n == 0 {
         return None;
     }
-    let idx = sim.x_values[..n].partition_point(|&xv| xv < x);
+    let idx = x_values[..n].partition_point(|&xv| xv < x);
     if idx == 0 {
         return Some(tr.real[0]);
     }
     if idx >= n {
         return Some(tr.real[n - 1]);
     }
-    let x0 = sim.x_values[idx - 1];
-    let x1 = sim.x_values[idx];
+    let x0 = x_values[idx - 1];
+    let x1 = x_values[idx];
     let y0 = tr.real[idx - 1];
     let y1 = tr.real[idx];
     let dx = x1 - x0;
@@ -911,6 +1023,7 @@ fn sample_trace_at(sim: &SimulationResult, trace_name: &str, x: f64) -> Option<f
 
 fn compute_y_bounds(
     sim: &SimulationResult,
+    x_values: &[f64],
     traces: &[(usize, String)],
     x_min: f64,
     x_max: f64,
@@ -923,7 +1036,7 @@ fn compute_y_bounds(
         let mut hi = f64::NEG_INFINITY;
         for (_, name) in traces {
             if let Some(tr) = sim.traces.get(name) {
-                for (&xv, &yv) in sim.x_values.iter().zip(tr.real.iter()) {
+                for (&xv, &yv) in x_values.iter().zip(tr.real.iter()) {
                     if xv >= x_min && xv <= x_max && yv.is_finite() {
                         lo = lo.min(yv);
                         hi = hi.max(yv);
@@ -953,11 +1066,13 @@ fn draw_dual_axis_graph(
     painter: &egui::Painter,
     sub_rect: Rect,
     sim: &SimulationResult,
+    x_values: &[f64],
     v_traces: &[(usize, String)],
     i_traces: &[(usize, String)],
     x_min: f64,
     x_span: f64,
     x_unit: &str,
+    y_unit_override: Option<&str>,
     v_bounds: Option<(f64, f64)>,
     i_bounds: Option<(f64, f64)>,
     draw_x_labels: bool,
@@ -1002,11 +1117,11 @@ fn draw_dual_axis_graph(
         "A"
     };
     let (left_y_min, left_y_max, left_unit) = if let Some((vy0, vy1)) = v_bounds {
-        (vy0, vy1, "V")
+        (vy0, vy1, y_unit_override.unwrap_or("V"))
     } else if let Some((iy0, iy1)) = i_bounds {
-        (iy0, iy1, sec_unit)
+        (iy0, iy1, y_unit_override.unwrap_or(sec_unit))
     } else {
-        (0.0, 5.0, "V")
+        (0.0, 5.0, y_unit_override.unwrap_or("V"))
     };
     let left_y_span = (left_y_max - left_y_min).max(1e-15);
     let y_ticks = 8;
@@ -1055,10 +1170,10 @@ fn draw_dual_axis_graph(
 
     let sub_painter = painter.with_clip_rect(sub_rect);
     if let Some((vy0, vy1)) = v_bounds {
-        draw_trace_group(&sub_painter, sub_rect, sim, v_traces, x_min, x_span, vy0, vy1);
+        draw_trace_group(&sub_painter, sub_rect, sim, x_values, v_traces, x_min, x_span, vy0, vy1);
     }
     if let Some((iy0, iy1)) = i_bounds {
-        draw_trace_group(&sub_painter, sub_rect, sim, i_traces, x_min, x_span, iy0, iy1);
+        draw_trace_group(&sub_painter, sub_rect, sim, x_values, i_traces, x_min, x_span, iy0, iy1);
     }
 }
 
@@ -1067,6 +1182,7 @@ fn draw_trace_group(
     sub_painter: &egui::Painter,
     sub_rect: Rect,
     sim: &SimulationResult,
+    x_values: &[f64],
     traces: &[(usize, String)],
     x_min: f64,
     x_span: f64,
@@ -1081,15 +1197,15 @@ fn draw_trace_group(
         let color = TRACE_COLORS[color_idx % TRACE_COLORS.len()];
         let stroke = Stroke::new(1.5_f32, color);
 
-        let n = sim.x_values.len().min(tr.real.len());
+        let n = x_values.len().min(tr.real.len());
         if n < 2 {
             continue;
         }
         let x_max = x_min + x_span;
-        let start_idx = sim.x_values[..n]
+        let start_idx = x_values[..n]
             .partition_point(|&x| x < x_min)
             .saturating_sub(1);
-        let end_idx = (sim.x_values[..n].partition_point(|&x| x <= x_max) + 1).min(n);
+        let end_idx = (x_values[..n].partition_point(|&x| x <= x_max) + 1).min(n);
         let vis_count = end_idx.saturating_sub(start_idx);
         if vis_count < 2 {
             continue;
@@ -1099,7 +1215,7 @@ fn draw_trace_group(
         if vis_count <= max_pts {
             let mut prev: Option<Pos2> = None;
             for i in start_idx..end_idx {
-                let xv = sim.x_values[i];
+                let xv = x_values[i];
                 let yv = tr.real[i];
                 if !xv.is_finite() || !yv.is_finite() {
                     prev = None;

@@ -16,6 +16,7 @@ pub enum EditorTool {
     Wire,
     Place(ComponentKind),
     Move,
+    Drag,
     Delete,
     PlaceDirective,
 }
@@ -512,12 +513,30 @@ pub fn draw_schematic_pane(
                     true,
                 );
             }
-            EditorTool::Move => {
-                if let Some((ax, ay)) = view.moving_anchor {
-                    let dx = gx - ax;
-                    let dy = gy - ay;
+            EditorTool::Move | EditorTool::Drag => {
+                let is_drag = *tool == EditorTool::Drag;
+                let (comp_ids, wire_ids, dx, dy) = if let Some((ax, ay)) = view.moving_anchor {
+                    (
+                        view.selected_components.clone(),
+                        view.selected_wires.clone(),
+                        gx - ax,
+                        gy - ay,
+                    )
+                } else if let Some(cid) = view.moving_comp_id {
+                    if let Some(orig) = schematic.components.iter().find(|c| c.id == cid) {
+                        let mut cset = HashSet::new();
+                        cset.insert(cid);
+                        (cset, HashSet::new(), gx - orig.x, gy - orig.y)
+                    } else {
+                        (HashSet::new(), HashSet::new(), 0, 0)
+                    }
+                } else {
+                    (HashSet::new(), HashSet::new(), 0, 0)
+                };
+
+                if !comp_ids.is_empty() || !wire_ids.is_empty() {
                     for c in &schematic.components {
-                        if view.selected_components.contains(&c.id) {
+                        if comp_ids.contains(&c.id) {
                             let mut ghost = c.clone();
                             ghost.x += dx;
                             ghost.y += dy;
@@ -532,27 +551,31 @@ pub fn draw_schematic_pane(
                     }
                     let ghost_wire_stroke = Stroke::new(
                         (1.6 * view.zoom).clamp(1.0, 3.0),
-                        Color32::from_rgba_unmultiplied(0, 0, 220, 130),
+                        Color32::from_rgba_unmultiplied(0, 0, 220, 140),
                     );
-                    for w in &schematic.wires {
-                        if view.selected_wires.contains(&w.id) {
-                            let p1 = to_screen((w.x1 + dx) as f32, (w.y1 + dy) as f32, view);
-                            let p2 = to_screen((w.x2 + dx) as f32, (w.y2 + dy) as f32, view);
+                    if is_drag {
+                        let mut preview_sch = schematic.clone();
+                        drag_with_wires(
+                            &mut preview_sch,
+                            &comp_ids,
+                            &wire_ids,
+                            &HashSet::new(),
+                            dx,
+                            dy,
+                        );
+                        for w in &preview_sch.wires {
+                            let p1 = to_screen(w.x1 as f32, w.y1 as f32, view);
+                            let p2 = to_screen(w.x2 as f32, w.y2 as f32, view);
                             painter.line_segment([p1, p2], ghost_wire_stroke);
                         }
-                    }
-                } else if let Some(cid) = view.moving_comp_id {
-                    if let Some(orig) = schematic.components.iter().find(|c| c.id == cid) {
-                        let mut ghost = orig.clone();
-                        ghost.x = gx;
-                        ghost.y = gy;
-                        draw_component(
-                            &painter,
-                            &ghost,
-                            &|x, y| to_screen(x, y, view),
-                            view.zoom,
-                            true,
-                        );
+                    } else {
+                        for w in &schematic.wires {
+                            if wire_ids.contains(&w.id) {
+                                let p1 = to_screen((w.x1 + dx) as f32, (w.y1 + dy) as f32, view);
+                                let p2 = to_screen((w.x2 + dx) as f32, (w.y2 + dy) as f32, view);
+                                painter.line_segment([p1, p2], ghost_wire_stroke);
+                            }
+                        }
                     }
                 }
             }
@@ -792,6 +815,7 @@ pub fn draw_schematic_pane(
                             } else {
                                 schematic.add_wire(sx, sy, gx, gy);
                             }
+                            schematic.split_wires_for_all_components();
                             view.wire_start = Some((gx, gy));
                             action = SchematicAction::Modified;
                         } else {
@@ -830,44 +854,77 @@ pub fn draw_schematic_pane(
                     *tool = EditorTool::SelectOrProbe;
                     return SchematicAction::RequestNewDirective(gx, gy);
                 }
-                EditorTool::Move => {
+                EditorTool::Move | EditorTool::Drag => {
+                    let is_drag = *tool == EditorTool::Drag;
                     if let Some((ax, ay)) = view.moving_anchor {
                         let dx = gx - ax;
                         let dy = gy - ay;
                         if dx != 0 || dy != 0 {
                             undo_stack.push(schematic.clone());
-                            for c in &mut schematic.components {
-                                if view.selected_components.contains(&c.id) {
-                                    c.x += dx;
-                                    c.y += dy;
+                            if is_drag {
+                                drag_with_wires(
+                                    schematic,
+                                    &view.selected_components,
+                                    &view.selected_wires,
+                                    &view.selected_directives,
+                                    dx,
+                                    dy,
+                                );
+                            } else {
+                                for c in &mut schematic.components {
+                                    if view.selected_components.contains(&c.id) {
+                                        c.x += dx;
+                                        c.y += dy;
+                                    }
                                 }
-                            }
-                            for w in &mut schematic.wires {
-                                if view.selected_wires.contains(&w.id) {
-                                    w.x1 += dx;
-                                    w.y1 += dy;
-                                    w.x2 += dx;
-                                    w.y2 += dy;
+                                for w in &mut schematic.wires {
+                                    if view.selected_wires.contains(&w.id) {
+                                        w.x1 += dx;
+                                        w.y1 += dy;
+                                        w.x2 += dx;
+                                        w.y2 += dy;
+                                    }
                                 }
-                            }
-                            for d in &mut schematic.directives {
-                                if view.selected_directives.contains(&d.id) {
-                                    d.x += dx;
-                                    d.y += dy;
+                                for d in &mut schematic.directives {
+                                    if view.selected_directives.contains(&d.id) {
+                                        d.x += dx;
+                                        d.y += dy;
+                                    }
                                 }
                             }
                             action = SchematicAction::Modified;
                         }
                         view.moving_anchor = None;
                     } else if let Some(cid) = view.moving_comp_id {
-                        undo_stack.push(schematic.clone());
-                        if let Some(c) = schematic.components.iter_mut().find(|c| c.id == cid) {
-                            c.x = gx;
-                            c.y = gy;
+                        if let Some(orig) = schematic.components.iter().find(|c| c.id == cid) {
+                            let dx = gx - orig.x;
+                            let dy = gy - orig.y;
+                            if dx != 0 || dy != 0 {
+                                undo_stack.push(schematic.clone());
+                                if is_drag {
+                                    let mut cset = HashSet::new();
+                                    cset.insert(cid);
+                                    drag_with_wires(
+                                        schematic,
+                                        &cset,
+                                        &HashSet::new(),
+                                        &HashSet::new(),
+                                        dx,
+                                        dy,
+                                    );
+                                } else {
+                                    if let Some(c) =
+                                        schematic.components.iter_mut().find(|c| c.id == cid)
+                                    {
+                                        c.x = gx;
+                                        c.y = gy;
+                                    }
+                                    schematic.split_wires_for_component(cid);
+                                }
+                                action = SchematicAction::Modified;
+                            }
                         }
-                        schematic.split_wires_for_component(cid);
                         view.moving_comp_id = None;
-                        action = SchematicAction::Modified;
                     } else if view.has_selection() {
                         view.moving_anchor = Some((gx, gy));
                     } else if let Some(cid) = hit_test_component(gx, gy, schematic) {
@@ -1529,5 +1586,160 @@ fn transform_f(lx: f32, ly: f32, rotation: i32, mirror: bool) -> (f32, f32) {
         180 => (-mx, -my),
         270 => (my, -mx),
         _ => (mx, my),
+    }
+}
+
+/// Move components/wires/directives by `(dx, dy)` while orthogonally stretching
+/// any connected wires so electrical connections remain intact.
+pub fn drag_with_wires(
+    schematic: &mut Schematic,
+    comp_ids: &HashSet<u64>,
+    wire_ids: &HashSet<u64>,
+    dir_ids: &HashSet<u64>,
+    dx: i32,
+    dy: i32,
+) {
+    if dx == 0 && dy == 0 {
+        return;
+    }
+
+    let mut moved_pins: HashSet<(i32, i32)> = HashSet::new();
+    for c in &schematic.components {
+        if comp_ids.contains(&c.id) {
+            for (_, px, py) in component_pins_world(c) {
+                moved_pins.insert((px, py));
+            }
+        }
+    }
+    for w in &schematic.wires {
+        if wire_ids.contains(&w.id) {
+            moved_pins.insert((w.x1, w.y1));
+            moved_pins.insert((w.x2, w.y2));
+        }
+    }
+
+    for c in &mut schematic.components {
+        if comp_ids.contains(&c.id) {
+            c.x += dx;
+            c.y += dy;
+        }
+    }
+    for d in &mut schematic.directives {
+        if dir_ids.contains(&d.id) {
+            d.x += dx;
+            d.y += dy;
+        }
+    }
+
+    let mut extra_wires: Vec<(i32, i32, i32, i32)> = Vec::new();
+    let mut t_bridged: HashSet<(i32, i32)> = HashSet::new();
+
+    for w in &mut schematic.wires {
+        if wire_ids.contains(&w.id) {
+            w.x1 += dx;
+            w.y1 += dy;
+            w.x2 += dx;
+            w.y2 += dy;
+            continue;
+        }
+        let m1 = moved_pins.contains(&(w.x1, w.y1));
+        let m2 = moved_pins.contains(&(w.x2, w.y2));
+        if m1 && m2 {
+            w.x1 += dx;
+            w.y1 += dy;
+            w.x2 += dx;
+            w.y2 += dy;
+        } else if m1 {
+            let was_horiz = w.y1 == w.y2;
+            let p_new = (w.x1 + dx, w.y1 + dy);
+            let q = (w.x2, w.y2);
+            if p_new.0 == q.0 || p_new.1 == q.1 {
+                w.x1 = p_new.0;
+                w.y1 = p_new.1;
+            } else if was_horiz {
+                w.x1 = p_new.0;
+                w.y1 = q.1;
+                extra_wires.push((p_new.0, p_new.1, p_new.0, q.1));
+            } else {
+                w.x1 = q.0;
+                w.y1 = p_new.1;
+                extra_wires.push((p_new.0, p_new.1, q.0, p_new.1));
+            }
+        } else if m2 {
+            let was_horiz = w.y1 == w.y2;
+            let p_new = (w.x2 + dx, w.y2 + dy);
+            let q = (w.x1, w.y1);
+            if p_new.0 == q.0 || p_new.1 == q.1 {
+                w.x2 = p_new.0;
+                w.y2 = p_new.1;
+            } else if was_horiz {
+                w.x2 = p_new.0;
+                w.y2 = q.1;
+                extra_wires.push((p_new.0, p_new.1, p_new.0, q.1));
+            } else {
+                w.x2 = q.0;
+                w.y2 = p_new.1;
+                extra_wires.push((p_new.0, p_new.1, q.0, p_new.1));
+            }
+        } else {
+            // Check if a moved pin touched the interior of this unmoved orthogonal wire (T-junction)
+            for &(px, py) in &moved_pins {
+                if t_bridged.contains(&(px, py)) {
+                    continue;
+                }
+                let on_interior = (w.x1 == w.x2
+                    && px == w.x1
+                    && py > w.y1.min(w.y2)
+                    && py < w.y1.max(w.y2))
+                    || (w.y1 == w.y2
+                        && py == w.y1
+                        && px > w.x1.min(w.x2)
+                        && px < w.x1.max(w.x2));
+                if on_interior {
+                    t_bridged.insert((px, py));
+                    let p_new = (px + dx, py + dy);
+                    if px == p_new.0 || py == p_new.1 {
+                        extra_wires.push((px, py, p_new.0, p_new.1));
+                    } else {
+                        extra_wires.push((px, py, p_new.0, py));
+                        extra_wires.push((p_new.0, py, p_new.0, p_new.1));
+                    }
+                }
+            }
+        }
+    }
+
+    schematic.wires.retain(|w| w.x1 != w.x2 || w.y1 != w.y2);
+    for (x1, y1, x2, y2) in extra_wires {
+        schematic.add_wire(x1, y1, x2, y2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_drag_with_wires_keeps_connections() {
+        let mut sch = Schematic::default_ltspice_demo();
+        let r1_id = sch
+            .components
+            .iter()
+            .find(|c| c.refdes == "R1")
+            .expect("R1 exists")
+            .id;
+        let mut cset = HashSet::new();
+        cset.insert(r1_id);
+
+        drag_with_wires(&mut sch, &cset, &HashSet::new(), &HashSet::new(), 1, -2);
+        let net = sch.to_spice_netlist();
+        // V(in) and V(out) should still be connected through R1 (netlist should have R1 between out and in)
+        assert!(
+            net.lines
+                .iter()
+                .any(|l| l.starts_with("R1 ") && l.contains("in") && l.contains("out")),
+            "R1 should remain connected between in and out after drag: {:?}",
+            net.lines
+        );
     }
 }

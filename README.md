@@ -8,7 +8,8 @@ A lightweight schematic capture and waveform viewer written in Rust (`egui`/`efr
 - **Schematic Editor**:
   - Classic light-gray (`#C0C0C0`) canvas with grid snapping, orthogonal wire routing, and junction dots.
   - Vector symbols for Resistors, Capacitors, Inductors, Diodes, Voltage/Current Sources, Op-Amps, NMOS/PMOS MOSFETs (with bulk arrow and body diode), NPN/PNP BJTs (with emitter arrow), Ground, Net Labels, and custom user symbols.
-  - Automatic wire cutting when placing or moving 2-pin components onto an existing wire.
+  - Automatic wire cutting when placing/moving 2-pin components onto an existing wire **or** when drawing a wire across a 2-pin component.
+  - **Move (`M` / `F7`)** and **Stretch / Drag keeping wires connected (`S` / `F8`)** with orthogonal wire rubber-banding (including T-junction preservation) and live ghost preview.
   - Independent dragging for component labels (`refdes`), values, and net labels; clicking a component's name or value selects and highlights the component.
   - Multi-selection (marquee box drag & `Shift+Click`), group Move/Delete/Rotate/Mirror, Undo/Redo, and `Ctrl+C` / `Ctrl+X` / `Ctrl+V` clipboard support.
   - Standard `.asc` import/export and JSON project save/load.
@@ -27,7 +28,10 @@ A lightweight schematic capture and waveform viewer written in Rust (`egui`/`efr
 - **Python Analysis Terminal (`🐍 Python` Tab)**:
   - Dedicated interactive `python3` REPL tab connected to your system Python (or a configurable Python/virtualenv path in **File → Settings...**).
   - Automatically syncs simulation data (`x`, `x_name`, `traces`, `netlist`) and provides helpers: `tr(name)`, `rms(s)`, `avg(s)`, `pp(s)`, `info()`, `reload()`.
-  - Write computed waveforms directly back to the viewer: `plot(name, y)` updates the integrated graph, while `new_plot(name, y)` / `new_graph()` creates a new plot pane.
+  - **Write Waveforms & Per-Graph Custom X-Axis / Units**:
+    - `plot(name, y, x=None, x_unit=None, y_unit=None, new_graph=False, graph=None)` updates an integrated graph; `new_plot(name, y, x=..., x_unit="Hz", y_unit="V")` / `new_graph()` creates a new plot pane.
+    - `set_xaxis(x_vals, unit="Hz", graph=None, y_unit=None)` overrides the X-axis scale and unit (and optional Y-axis unit) for a specific graph—ideal for plotting FFT spectra in `Hz` alongside time-domain plots in `s`.
+  - **Script Recording & Playback**: **`● Record` / `■ Stop`** captures only non-failing commands for saving as a `.py` script (**`Save Script...`**), and **`Load & Play...` / `▶ Play`** loads and re-runs `.py` analysis scripts.
 - **SPICE Configuration Dialogs**:
   - **Independent Voltage / Current Source**: `(none)`, `PULSE`, `SINE`, `EXP`, `SFFM`, `PWL`, `PWL FILE`, DC value, Small-signal AC, and Parasitic properties.
   - **Capacitor Properties**: Manufacturer/Part/Type metadata, Capacitance, Voltage/RMS Current ratings, ESR, ESL, Rpar, Cpar, and built-in capacitor preset library.
@@ -108,6 +112,8 @@ cargo test
 | `D` | Place Diode |
 | `P` | Open Component Picker |
 | `N` | Place Net Label |
+| `M` / `F7` | Move Component |
+| `S` / `F8` | Stretch / Drag Component (keep wires connected) |
 | `Ctrl+R` | Rotate placement ghost or selected components |
 | `E` | Mirror placement ghost or selected components |
 | `Ctrl+Z` | Undo |
@@ -142,6 +148,7 @@ MCP_ITSpice includes a built-in MCP server (`MCP_ITSpice`) that allows AI assist
 - `get_schematic`, `new_schematic`, `load_schematic`, `save_schematic`
 - `add_component`, `edit_component`, `remove_component`, `add_wire`, `set_directive`
 - `run_simulation`, `run_spice_netlist`, `get_trace`
+- `python_exec`, `python_run_script`, `get_python_output` (connected to the persistent Python analysis session with live GUI waveform/plot sync)
 
 ## Project Structure
 

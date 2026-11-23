@@ -332,6 +332,14 @@ impl Schematic {
         id
     }
 
+    /// Cuts any wire that passes between the two pads of any 2-pin component on the schematic.
+    pub fn split_wires_for_all_components(&mut self) {
+        let comp_ids: Vec<u64> = self.components.iter().map(|c| c.id).collect();
+        for cid in comp_ids {
+            self.split_wires_for_component(cid);
+        }
+    }
+
     /// Cuts any wire that passes between the two pads of a 2-pin component so the component
     /// is inserted in series rather than shorted out.
     pub fn split_wires_for_component(&mut self, comp_id: u64) {
@@ -1234,6 +1242,23 @@ mod tests {
         let n_left = &net.point_to_net[&(0, 10)];
         let n_right = &net.point_to_net[&(10, 10)];
         assert_ne!(n_left, n_right, "wire should be cut between resistor pads");
+    }
+
+    #[test]
+    fn test_draw_wire_across_component_cuts_between_pins() {
+        let mut sch = Schematic::new_empty("wire_cut_test.asc");
+        sch.add_component(ComponentKind::Resistor, "R1".into(), "1k".into(), 5, 10);
+        sch.components.last_mut().unwrap().rotation = 90; // pins at (3, 10) and (7, 10)
+        sch.add_wire(0, 10, 10, 10);
+        sch.split_wires_for_all_components();
+
+        assert_eq!(sch.wires.len(), 2);
+        let net = sch.to_spice_netlist();
+        assert_ne!(
+            net.point_to_net[&(0, 10)],
+            net.point_to_net[&(10, 10)],
+            "wire drawn across resistor should be cut between its two pins"
+        );
     }
 
     #[test]

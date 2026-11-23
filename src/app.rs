@@ -283,6 +283,7 @@ impl ItSpiceApp {
 impl eframe::App for ItSpiceApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Sync live updates from MCP server if running in --mcp GUI mode
+        let mut mcp_pending_cmds: Vec<crate::python_terminal::PyPlotCommand> = Vec::new();
         if let Some(shared) = &self.mcp_shared {
             if let Ok(mut st) = shared.lock() {
                 if st.revision != self.last_mcp_revision {
@@ -306,6 +307,7 @@ impl eframe::App for ItSpiceApp {
                         self.sim_result = None;
                         self.waveform_view.active_traces.clear();
                     }
+                    mcp_pending_cmds.extend(st.pending_plot_cmds.drain(..));
                     if st.zoom_fit_requested {
                         self.first_frame = true;
                         st.zoom_fit_requested = false;
@@ -315,6 +317,9 @@ impl eframe::App for ItSpiceApp {
                 }
             }
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        for cmd in mcp_pending_cmds {
+            self.apply_py_plot_cmd(cmd);
         }
 
         // Global keyboard shortcuts (when not typing in a text field)
@@ -347,6 +352,10 @@ impl eframe::App for ItSpiceApp {
                     self.tool = EditorTool::ProbeCurrent;
                 } else if no_mod && i.key_pressed(egui::Key::V) {
                     self.tool = EditorTool::SelectOrProbe;
+                } else if no_mod && i.key_pressed(egui::Key::F7) || no_mod && i.key_pressed(egui::Key::M) {
+                    self.tool = EditorTool::Move;
+                } else if no_mod && i.key_pressed(egui::Key::F8) || no_mod && i.key_pressed(egui::Key::S) {
+                    self.tool = EditorTool::Drag;
                 }
             });
         }
@@ -383,6 +392,14 @@ impl eframe::App for ItSpiceApp {
                         .unwrap_or_else(|| "Simulation failed".into());
                 }
                 self.sim_result = Some(res);
+                if let Some(shared) = &self.mcp_shared {
+                    if let Ok(mut st) = shared.lock() {
+                        st.schematic = self.schematic.clone();
+                        st.last_sim = self.sim_result.clone();
+                        st.revision += 1;
+                        self.last_mcp_revision = st.revision;
+                    }
+                }
                 if self.python_terminal.is_running() {
                     self.python_terminal
                         .sync_sim_data(self.sim_result.as_ref(), &self.netlist);
@@ -774,11 +791,20 @@ impl eframe::App for ItSpiceApp {
                 if icon_button(
                     ui,
                     ToolbarIcon::Move,
-                    "Move Component",
+                    "Move Component (M / F7)",
                     self.tool == EditorTool::Move,
                     true,
                 ) {
                     self.tool = EditorTool::Move;
+                }
+                if icon_button(
+                    ui,
+                    ToolbarIcon::Drag,
+                    "Stretch / Drag Component & Keep Wires (S / F8)",
+                    self.tool == EditorTool::Drag,
+                    true,
+                ) {
+                    self.tool = EditorTool::Drag;
                 }
                 if icon_button(
                     ui,
@@ -940,58 +966,21 @@ impl eframe::App for ItSpiceApp {
                             })
                             .inner;
                         for cmd in new_waves {
-                            if cmd.new_graph {
-                                self.waveform_view.add_graph();
+                            self.apply_py_plot_cmd(cmd);
+                        }
+                        if let Some(shared) = &self.mcp_shared {
+                            if let Ok(mut st) = shared.lock() {
+                                st.last_sim = self.sim_result.clone();
+                                st.gui_python_log = self
+                                    .python_terminal
+                                    .lines
+                                    .iter()
+                                    .rev()
+                                    .take(200)
+                                    .rev()
+                                    .map(|(l, _)| l.clone())
+                                    .collect();
                             }
-                            if cmd.name.is_empty() {
-                                self.status_msg = "Created new waveform plot from Python".into();
-                                continue;
-                            }
-                            let w_name = cmd.name;
-                            let w_vals = cmd.y;
-                            if let Some(sim) = self.sim_result.as_mut() {
-                                sim.traces.insert(
-                                    w_name.clone(),
-                                    crate::ngspice::TraceData {
-                                        name: w_name.clone(),
-                                        real: w_vals,
-                                        imag: None,
-                                    },
-                                );
-                            } else {
-                                let mut traces = std::collections::HashMap::new();
-                                let n = w_vals.len();
-                                traces.insert(
-                                    w_name.clone(),
-                                    crate::ngspice::TraceData {
-                                        name: w_name.clone(),
-                                        real: w_vals,
-                                        imag: None,
-                                    },
-                                );
-                                self.sim_result = Some(SimulationResult {
-                                    plot_name: "python".to_string(),
-                                    x_name: "index".to_string(),
-                                    x_values: (0..n).map(|i| i as f64).collect(),
-                                    traces,
-                                    log: Vec::new(),
-                                    success: true,
-                                    error: None,
-                                });
-                            }
-                            let target = if self.waveform_view.focused_graph > 0
-                                && self.waveform_view.focused_graph
-                                    <= self.waveform_view.extra_graphs.len()
-                            {
-                                &mut self.waveform_view.extra_graphs
-                                    [self.waveform_view.focused_graph - 1]
-                            } else {
-                                &mut self.waveform_view.active_traces
-                            };
-                            if !target.contains(&w_name) {
-                                target.push(w_name.clone());
-                            }
-                            self.status_msg = format!("Added waveform '{w_name}' from Python");
                         }
                     }
                     LayoutMode::WaveformOnly => {
@@ -1173,6 +1162,86 @@ impl eframe::App for ItSpiceApp {
 }
 
 impl ItSpiceApp {
+    fn apply_py_plot_cmd(&mut self, cmd: crate::python_terminal::PyPlotCommand) {
+        if cmd.new_graph {
+            self.waveform_view.add_graph();
+        }
+        let target_graph = cmd.graph_idx.unwrap_or(self.waveform_view.focused_graph);
+        let max_g = self.waveform_view.extra_graphs.len();
+        let target_graph = target_graph.min(max_g);
+
+        if cmd.x_values.is_some() || cmd.x_unit.is_some() || cmd.y_unit.is_some() {
+            let x_vals = cmd.x_values.unwrap_or_else(|| {
+                self.waveform_view
+                    .graph_x_overrides
+                    .get(&target_graph)
+                    .map(|g| g.x_values.clone())
+                    .unwrap_or_default()
+            });
+            let x_unit = cmd.x_unit.unwrap_or_else(|| {
+                self.waveform_view
+                    .graph_x_overrides
+                    .get(&target_graph)
+                    .map(|g| g.x_unit.clone())
+                    .unwrap_or_else(|| "Hz".to_string())
+            });
+            let y_unit = cmd.y_unit.or_else(|| {
+                self.waveform_view
+                    .graph_x_overrides
+                    .get(&target_graph)
+                    .and_then(|g| g.y_unit.clone())
+            });
+            self.waveform_view
+                .set_graph_xaxis(target_graph, x_vals, x_unit, y_unit);
+        }
+
+        if cmd.name.is_empty() {
+            self.status_msg = format!("Updated waveform graph {target_graph} from Python");
+            return;
+        }
+        let w_name = cmd.name;
+        let w_vals = cmd.y;
+        if let Some(sim) = self.sim_result.as_mut() {
+            sim.traces.insert(
+                w_name.clone(),
+                crate::ngspice::TraceData {
+                    name: w_name.clone(),
+                    real: w_vals,
+                    imag: None,
+                },
+            );
+        } else {
+            let mut traces = std::collections::HashMap::new();
+            let n = w_vals.len();
+            traces.insert(
+                w_name.clone(),
+                crate::ngspice::TraceData {
+                    name: w_name.clone(),
+                    real: w_vals,
+                    imag: None,
+                },
+            );
+            self.sim_result = Some(SimulationResult {
+                plot_name: "python".to_string(),
+                x_name: "index".to_string(),
+                x_values: (0..n).map(|i| i as f64).collect(),
+                traces,
+                log: Vec::new(),
+                success: true,
+                error: None,
+            });
+        }
+        let target = if target_graph > 0 && target_graph <= self.waveform_view.extra_graphs.len() {
+            &mut self.waveform_view.extra_graphs[target_graph - 1]
+        } else {
+            &mut self.waveform_view.active_traces
+        };
+        if !target.contains(&w_name) {
+            target.push(w_name.clone());
+        }
+        self.status_msg = format!("Added waveform '{w_name}' to graph {target_graph}");
+    }
+
     fn handle_schematic_pane(&mut self, ui: &mut Ui) {
         let action = draw_schematic_pane(
             ui,
