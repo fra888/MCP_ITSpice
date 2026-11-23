@@ -1,7 +1,7 @@
 # MCP_ITSpice
 
 MCP ITALIAN Spice 
-A lightweight schematic capture and waveform viewer written in Rust (`egui`/`eframe`) inspired by a famous SPICE tool, interfaced directly with **`ngspice`** / **`libngspice`** and featuring a built-in **Model Context Protocol (MCP)** server with live GUI synchronization.
+A lightweight schematic capture and waveform viewer written in Rust (`egui`/`eframe`) inspired by a famous SPICE tool, interfaced directly with **`ngspice`** / **`libngspice`** and featuring a built-in **Model Context Protocol (MCP)** server with live GUI synchronization and a python integrated terminal for data analysis.
 
 ## Features
 
