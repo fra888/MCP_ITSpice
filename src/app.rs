@@ -352,10 +352,32 @@ impl eframe::App for ItSpiceApp {
                     self.tool = EditorTool::ProbeCurrent;
                 } else if no_mod && i.key_pressed(egui::Key::V) {
                     self.tool = EditorTool::SelectOrProbe;
-                } else if no_mod && i.key_pressed(egui::Key::F7) || no_mod && i.key_pressed(egui::Key::M) {
+                } else if no_mod && (i.key_pressed(egui::Key::F7) || i.key_pressed(egui::Key::M)) {
                     self.tool = EditorTool::Move;
-                } else if no_mod && i.key_pressed(egui::Key::F8) || no_mod && i.key_pressed(egui::Key::S) {
+                    if self.schematic_view.has_selection() {
+                        let anchor = self.schematic_view.cursor_grid.or_else(|| {
+                            self.schematic
+                                .components
+                                .iter()
+                                .find(|c| self.schematic_view.selected_components.contains(&c.id))
+                                .map(|c| (c.x, c.y))
+                        });
+                        self.schematic_view.moving_anchor = anchor;
+                        self.schematic_view.moving_comp_id = None;
+                    }
+                } else if no_mod && (i.key_pressed(egui::Key::F8) || i.key_pressed(egui::Key::S)) {
                     self.tool = EditorTool::Drag;
+                    if self.schematic_view.has_selection() {
+                        let anchor = self.schematic_view.cursor_grid.or_else(|| {
+                            self.schematic
+                                .components
+                                .iter()
+                                .find(|c| self.schematic_view.selected_components.contains(&c.id))
+                                .map(|c| (c.x, c.y))
+                        });
+                        self.schematic_view.moving_anchor = anchor;
+                        self.schematic_view.moving_comp_id = None;
+                    }
                 }
             });
         }

@@ -895,6 +895,7 @@ pub fn draw_schematic_pane(
                             action = SchematicAction::Modified;
                         }
                         view.moving_anchor = None;
+                        *tool = EditorTool::SelectOrProbe;
                     } else if let Some(cid) = view.moving_comp_id {
                         if let Some(orig) = schematic.components.iter().find(|c| c.id == cid) {
                             let dx = gx - orig.x;
@@ -925,10 +926,15 @@ pub fn draw_schematic_pane(
                             }
                         }
                         view.moving_comp_id = None;
+                    } else if let Some(cid) = hit_test_component(gx, gy, schematic) {
+                        if view.selected_components.contains(&cid) {
+                            view.moving_anchor = Some((gx, gy));
+                        } else {
+                            view.clear_selection();
+                            view.moving_comp_id = Some(cid);
+                        }
                     } else if view.has_selection() {
                         view.moving_anchor = Some((gx, gy));
-                    } else if let Some(cid) = hit_test_component(gx, gy, schematic) {
-                        view.moving_comp_id = Some(cid);
                     }
                 }
                 EditorTool::Delete => {
@@ -1604,10 +1610,15 @@ pub fn drag_with_wires(
     }
 
     let mut moved_pins: HashSet<(i32, i32)> = HashSet::new();
+    let mut unmoved_pins: HashSet<(i32, i32)> = HashSet::new();
     for c in &schematic.components {
         if comp_ids.contains(&c.id) {
             for (_, px, py) in component_pins_world(c) {
                 moved_pins.insert((px, py));
+            }
+        } else {
+            for (_, px, py) in component_pins_world(c) {
+                unmoved_pins.insert((px, py));
             }
         }
     }
@@ -1709,6 +1720,20 @@ pub fn drag_with_wires(
         }
     }
 
+    // Preserve direct pin-to-pin connections between moved and stationary components
+    for &(px, py) in &moved_pins {
+        if unmoved_pins.contains(&(px, py)) && !t_bridged.contains(&(px, py)) {
+            t_bridged.insert((px, py));
+            let p_new = (px + dx, py + dy);
+            if px == p_new.0 || py == p_new.1 {
+                extra_wires.push((px, py, p_new.0, p_new.1));
+            } else {
+                extra_wires.push((px, py, p_new.0, py));
+                extra_wires.push((p_new.0, py, p_new.0, p_new.1));
+            }
+        }
+    }
+
     schematic.wires.retain(|w| w.x1 != w.x2 || w.y1 != w.y2);
     for (x1, y1, x2, y2) in extra_wires {
         schematic.add_wire(x1, y1, x2, y2);
@@ -1718,6 +1743,28 @@ pub fn drag_with_wires(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_drag_directly_connected_components_keeps_connection() {
+        let mut sch = Schematic::new_empty("direct_pin_drag.asc");
+        // R1 at (10, 10) rot 90 -> pins (8, 10) and (12, 10)
+        let r1 = sch.add_component(ComponentKind::Resistor, "R1".into(), "1k".into(), 10, 10);
+        sch.components.last_mut().unwrap().rotation = 90;
+        // C1 at (12, 12) rot 0 -> pins (12, 10) and (12, 14) -> pin (12, 10) directly touches R1!
+        let _c1 = sch.add_component(ComponentKind::Capacitor, "C1".into(), "100n".into(), 12, 12);
+
+        let mut cset = HashSet::new();
+        cset.insert(r1);
+        drag_with_wires(&mut sch, &cset, &HashSet::new(), &HashSet::new(), -2, -2);
+
+        let net = sch.to_spice_netlist();
+        // R1 pin 2 moved to (10, 8), C1 pin 1 stayed at (12, 10) -> must still share the same net
+        assert_eq!(
+            net.point_to_net[&(10, 8)],
+            net.point_to_net[&(12, 10)],
+            "directly connected components must remain connected after stretch/drag"
+        );
+    }
 
     #[test]
     fn test_drag_with_wires_keeps_connections() {
