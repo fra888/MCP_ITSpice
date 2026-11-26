@@ -12,30 +12,123 @@ pub struct AppSettings {
     pub user_model_dirs: Vec<String>,
 }
 
-pub fn detect_python_path() -> String {
-    for candidate in ["/usr/bin/python3", "/usr/local/bin/python3"] {
-        if Path::new(candidate).is_file() {
-            return candidate.to_string();
+pub fn user_home_dir() -> Option<PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.trim().is_empty() {
+            return Some(PathBuf::from(home));
         }
     }
-    "python3".to_string()
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        if !profile.trim().is_empty() {
+            return Some(PathBuf::from(profile));
+        }
+    }
+    if let (Ok(drive), Ok(path)) = (std::env::var("HOMEDRIVE"), std::env::var("HOMEPATH")) {
+        let combined = format!("{drive}{path}");
+        if !combined.trim().is_empty() {
+            return Some(PathBuf::from(combined));
+        }
+    }
+    None
+}
+
+pub fn find_in_path(exe_name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(exe_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+pub fn detect_python_path() -> String {
+    #[cfg(windows)]
+    {
+        for exe in ["python.exe", "python3.exe", "py.exe"] {
+            if let Some(found) = find_in_path(exe) {
+                return found.display().to_string();
+            }
+        }
+        if let Ok(local_app) = std::env::var("LOCALAPPDATA") {
+            let py_root = PathBuf::from(local_app).join("Programs").join("Python");
+            if let Ok(entries) = std::fs::read_dir(&py_root) {
+                let mut dirs: Vec<PathBuf> = entries
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| p.is_dir())
+                    .collect();
+                dirs.sort();
+                for dir in dirs.into_iter().rev() {
+                    let cand = dir.join("python.exe");
+                    if cand.is_file() {
+                        return cand.display().to_string();
+                    }
+                }
+            }
+        }
+        return "python".to_string();
+    }
+    #[cfg(not(windows))]
+    {
+        for candidate in ["/usr/bin/python3", "/usr/local/bin/python3"] {
+            if Path::new(candidate).is_file() {
+                return candidate.to_string();
+            }
+        }
+        if let Some(found) = find_in_path("python3") {
+            return found.display().to_string();
+        }
+        "python3".to_string()
+    }
 }
 
 pub fn detect_ngspice_path() -> String {
-    for candidate in ["/usr/bin/ngspice", "/usr/local/bin/ngspice"] {
-        if Path::new(candidate).is_file() {
-            return candidate.to_string();
+    #[cfg(windows)]
+    {
+        for exe in ["ngspice_con.exe", "ngspice.exe"] {
+            if let Some(found) = find_in_path(exe) {
+                return found.display().to_string();
+            }
         }
-    }
-    for lib_candidate in [
-        "/lib/x86_64-linux-gnu/libngspice.so.0",
-        "/usr/lib/x86_64-linux-gnu/libngspice.so.0",
-    ] {
-        if Path::new(lib_candidate).is_file() {
-            return lib_candidate.to_string();
+        for candidate in [
+            r"C:\Spice64\bin\ngspice_con.exe",
+            r"C:\Spice64\bin\ngspice.exe",
+            r"C:\Program Files\ngspice\bin\ngspice_con.exe",
+            r"C:\Program Files\ngspice\bin\ngspice.exe",
+            r"C:\msys64\ucrt64\bin\ngspice.exe",
+            r"C:\msys64\mingw64\bin\ngspice.exe",
+            r"C:\Spice64_dll\dll-vs\ngspice.dll",
+            r"C:\Spice64\bin\ngspice.dll",
+        ] {
+            if Path::new(candidate).is_file() {
+                return candidate.to_string();
+            }
         }
+        return "ngspice_con.exe".to_string();
     }
-    "ngspice".to_string()
+    #[cfg(not(windows))]
+    {
+        for candidate in ["/usr/bin/ngspice", "/usr/local/bin/ngspice"] {
+            if Path::new(candidate).is_file() {
+                return candidate.to_string();
+            }
+        }
+        if let Some(found) = find_in_path("ngspice") {
+            return found.display().to_string();
+        }
+        for lib_candidate in [
+            "/lib/x86_64-linux-gnu/libngspice.so.0",
+            "/usr/lib/x86_64-linux-gnu/libngspice.so.0",
+            "/usr/local/lib/libngspice.dylib",
+            "/opt/homebrew/lib/libngspice.dylib",
+        ] {
+            if Path::new(lib_candidate).is_file() {
+                return lib_candidate.to_string();
+            }
+        }
+        "ngspice".to_string()
+    }
 }
 
 impl Default for AppSettings {
@@ -48,20 +141,35 @@ impl Default for AppSettings {
                 }
             }
         }
-        for p in [
+        #[cfg(windows)]
+        let platform_dirs: &[&str] = &[
+            r"C:\Spice64\share\ngspice",
+            r"C:\Spice64\share\ngspice\scripts",
+            r"C:\Program Files\ngspice\share\ngspice",
+            r"C:\msys64\ucrt64\share\ngspice",
+            r"C:\msys64\mingw64\share\ngspice",
+        ];
+        #[cfg(not(windows))]
+        let platform_dirs: &[&str] = &[
             "/usr/share/ngspice",
             "/usr/share/ngspice/scripts",
             "/usr/local/share/ngspice",
             "/usr/lib/x86_64-linux-gnu/ngspice",
-        ] {
+        ];
+        for p in platform_dirs {
             if !ngspice_default_dirs.iter().any(|x| x == p) {
-                ngspice_default_dirs.push(p.to_string());
+                ngspice_default_dirs.push((*p).to_string());
             }
         }
 
         let mut user_model_dirs = vec!["./models".to_string()];
-        if let Ok(home) = std::env::var("HOME") {
-            user_model_dirs.push(format!("{home}/MCP_ITSpice/models"));
+        if let Some(home) = user_home_dir() {
+            user_model_dirs.push(
+                home.join("MCP_ITSpice")
+                    .join("models")
+                    .display()
+                    .to_string(),
+            );
         }
 
         Self {
@@ -75,8 +183,16 @@ impl Default for AppSettings {
 
 impl AppSettings {
     pub fn config_path() -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        Some(PathBuf::from(home).join(".config/mcp_itspice/settings.json"))
+        #[cfg(windows)]
+        {
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                if !appdata.trim().is_empty() {
+                    return Some(PathBuf::from(appdata).join("MCP_ITSpice").join("settings.json"));
+                }
+            }
+        }
+        let home = user_home_dir()?;
+        Some(home.join(".config").join("mcp_itspice").join("settings.json"))
     }
 
     pub fn load() -> Self {
@@ -92,7 +208,7 @@ impl AppSettings {
 
     pub fn save(&self) -> Result<(), String> {
         let Some(path) = Self::config_path() else {
-            return Err("HOME environment variable not set".into());
+            return Err("User home/config directory environment variable not set".into());
         };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)

@@ -75,6 +75,7 @@ pub struct ItSpiceApp {
     sim_result: Option<SimulationResult>,
     sim_rx: Option<Receiver<SimulationResult>>,
     sim_running: bool,
+    sim_dirty: bool,
     ngspice_error: Option<String>,
 
     edit_modal: Option<EditModal>,
@@ -129,6 +130,7 @@ impl ItSpiceApp {
             sim_result: None,
             sim_rx: None,
             sim_running: false,
+            sim_dirty: false,
             ngspice_error: None,
             edit_modal: None,
             source_dialog: None,
@@ -171,6 +173,7 @@ impl ItSpiceApp {
         self.netlist = self
             .schematic
             .to_spice_netlist_with_models(Some(&self.model_index));
+        self.sim_dirty = true;
     }
 
     fn run_simulation(&mut self, auto_select_demo_traces: bool) {
@@ -178,6 +181,7 @@ impl ItSpiceApp {
             return;
         }
         self.refresh_netlist();
+        self.sim_dirty = false;
         let lines = self.netlist.lines.clone();
         let search_paths = self.settings.all_model_dirs();
         let ngspice_exe = self.settings.ngspice_executable.clone();
@@ -954,6 +958,12 @@ impl eframe::App for ItSpiceApp {
                         Color32::RED
                     };
                     ui.label(RichText::new(format!("Click to probe {probe}")).color(color));
+                } else if self.sim_dirty && !self.sim_running {
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Circuit modified — click Run (▶) to re-simulate and probe new nodes")
+                            .color(Color32::from_rgb(180, 95, 0)),
+                    );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let is_py = self.layout_mode == LayoutMode::PythonTerminal;
@@ -1791,7 +1801,7 @@ impl ItSpiceApp {
                 .resizable(true)
                 .show(ctx, |ui| {
                     ui.heading("ngspice Executable / Library Path");
-                    ui.label("Path to ngspice binary or libngspice.so.0:");
+                    ui.label("Path to ngspice binary or shared library (libngspice.so.0 / ngspice.dll):");
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.settings.ngspice_executable)
@@ -1810,7 +1820,7 @@ impl ItSpiceApp {
                     ui.add_space(10.0);
                     ui.separator();
                     ui.heading("Python Executable Path");
-                    ui.label("Path to python3 binary or virtualenv python (e.g. /path/to/venv/bin/python):");
+                    ui.label("Path to python binary or virtualenv python (e.g. /path/to/venv/bin/python or C:\\...\\python.exe):");
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut self.settings.python_executable)

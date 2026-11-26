@@ -72,25 +72,25 @@ source "$HOME/.cargo/env"
   sudo pacman -S --needed base-devel pkgconf ngspice \
     gtk3 libx11 libxkbcommon wayland libglvnd
   ```
+- **Windows (10 / 11)**:
+  - Install [Rust (MSVC toolchain)](https://rustup.rs/) with Visual Studio C++ Build Tools.
+  - Install [ngspice for Windows](https://ngspice.sourceforge.io/download.html) (e.g. extract to `C:\Spice64` so `C:\Spice64\bin\ngspice_con.exe` or `ngspice.dll` is auto-detected, or set the path in **File → Settings...**).
+  - Optional: Install [Python 3 for Windows](https://www.python.org/downloads/windows/) (`python.exe` is auto-detected from `PATH` or `%LOCALAPPDATA%\Programs\Python`).
 
 ## Build & Run
 
 ### Build from Source
 ```bash
-git clone https://github.com/fra888/MCP_ITSpice/MCP_ITSpice
+git clone https://github.com/fra888/MCP_ITSpice
 cd MCP_ITSpice
 cargo build --release
 ```
-The compiled binary will be at `target/release/MCP_ITSpice` (or `target/debug/MCP_ITSpice` for debug builds via `cargo build`).
+The compiled binary will be at `target/release/MCP_ITSpice` on Linux/macOS or `target\release\MCP_ITSpice.exe` on Windows.
 
 ### Run the GUI
-```bash
-./run.sh
-```
-Or with Cargo directly:
-```bash
-cargo run --release
-```
+- **Linux / macOS**: `./run.sh`
+- **Windows**: `run.bat`
+- Or with Cargo directly: `cargo run --release`
 
 ### Run Tests
 ```bash

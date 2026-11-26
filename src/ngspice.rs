@@ -139,7 +139,24 @@ impl NgSpiceEngine {
     }
 
     pub fn load() -> Result<Self, String> {
-        let candidates = [
+        #[cfg(windows)]
+        let candidates: &[&str] = &[
+            "ngspice.dll",
+            "libngspice-0.dll",
+            r"C:\Spice64_dll\dll-vs\ngspice.dll",
+            r"C:\Spice64\bin\ngspice.dll",
+            r"C:\Program Files\ngspice\bin\ngspice.dll",
+            r"C:\msys64\ucrt64\bin\libngspice-0.dll",
+            r"C:\msys64\mingw64\bin\libngspice-0.dll",
+        ];
+        #[cfg(target_os = "macos")]
+        let candidates: &[&str] = &[
+            "libngspice.dylib",
+            "/usr/local/lib/libngspice.dylib",
+            "/opt/homebrew/lib/libngspice.dylib",
+        ];
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let candidates: &[&str] = &[
             "libngspice.so.0",
             "libngspice.so",
             "/lib/x86_64-linux-gnu/libngspice.so.0",
@@ -516,14 +533,20 @@ pub fn run_simulation_with_settings(
     ngspice_path: &str,
 ) -> SimulationResult {
     let trimmed = ngspice_path.trim();
-    let use_cli = !trimmed.is_empty()
-        && !trimmed.contains("libngspice")
-        && !trimmed.ends_with(".so")
-        && !trimmed.contains(".so.")
-        && (trimmed != "ngspice" || std::path::Path::new("/usr/bin/ngspice").is_file());
+    let lower = trimmed.to_ascii_lowercase();
+    let is_shared_lib = lower.contains("libngspice")
+        || lower.ends_with(".so")
+        || lower.contains(".so.")
+        || lower.ends_with(".dll")
+        || lower.ends_with(".dylib");
 
-    if use_cli && std::path::Path::new(trimmed).is_file() {
-        return run_ngspice_cli(trimmed, netlist_lines, search_paths);
+    if !trimmed.is_empty() && !is_shared_lib {
+        if std::path::Path::new(trimmed).is_file() {
+            return run_ngspice_cli(trimmed, netlist_lines, search_paths);
+        }
+        if let Some(found) = crate::settings::find_in_path(trimmed) {
+            return run_ngspice_cli(&found.to_string_lossy(), netlist_lines, search_paths);
+        }
     }
 
     match NgSpiceEngine::global() {
@@ -557,8 +580,11 @@ fn run_ngspice_cli(
     search_paths: &[PathBuf],
 ) -> SimulationResult {
     let tmp = std::env::temp_dir();
-    let cir_path = tmp.join("mcp_itspice_run.cir");
-    let raw_path = tmp.join("mcp_itspice_run.raw");
+    let raw_filename = format!("mcp_itspice_run_{}.raw", std::process::id());
+    let cir_path = tmp.join(format!("mcp_itspice_run_{}.cir", std::process::id()));
+    let raw_path = tmp.join(&raw_filename);
+    // Remove any stale raw file so we never accidentally read results from a previous run
+    let _ = std::fs::remove_file(&raw_path);
 
     let mut content = String::new();
     for l in netlist_lines {
@@ -569,16 +595,26 @@ fn run_ngspice_cli(
         content.push('\n');
     }
     content.push_str(".control\nset filetype=ascii\n");
-    if !search_paths.is_empty() {
+    let mut sp_entries: Vec<String> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        sp_entries.push(cwd.to_string_lossy().replace('\\', "/"));
+    }
+    for p in search_paths {
+        sp_entries.push(p.to_string_lossy().replace('\\', "/"));
+    }
+    if !sp_entries.is_empty() {
         content.push_str("set sourcepath = ( .");
-        for p in search_paths {
-            content.push_str(&format!(" \"{}\"", p.display()));
+        for s in &sp_entries {
+            if !s.trim().is_empty() {
+                content.push_str(&format!(" \"{s}\""));
+            }
         }
         content.push_str(" )\n");
     }
+    // Use a simple filename in `tmp` (set as current_dir) because ngspice's `write`
+    // command treats quotes literally and fails on paths with spaces.
     content.push_str(&format!(
-        "run\nwrite {} all\nquit\n.endc\n.end\n",
-        raw_path.display()
+        "run\nwrite {raw_filename} all\nquit\n.endc\n.end\n"
     ));
 
     if let Err(e) = std::fs::write(&cir_path, content) {
@@ -593,11 +629,14 @@ fn run_ngspice_cli(
         };
     }
 
-    let output = match std::process::Command::new(exe)
-        .arg("-b")
-        .arg(&cir_path)
-        .output()
+    let mut cmd = std::process::Command::new(exe);
+    cmd.current_dir(&tmp).arg("-b").arg(&cir_path);
+    #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let output = match cmd.output() {
         Ok(o) => o,
         Err(e) => {
             return SimulationResult {
@@ -845,5 +884,67 @@ mod tests {
         assert_eq!(format_trace_name("i(v_sense_e_q1)"), "Ie(q1)");
         assert_eq!(format_trace_name("i(v_sense_out_u1)"), "I(u1:out)");
         assert_eq!(format_trace_name("v_sense_p2_x1#branch"), "I(x1:2)");
+    }
+
+    #[test]
+    fn test_ngspice_resim_new_nodes_and_components() {
+        let engine_mutex = NgSpiceEngine::global().expect("libngspice should load");
+        let engine = engine_mutex.lock().unwrap();
+        let netlist1 = vec![
+            "* RC stage 1".to_string(),
+            "V1 in 0 SIN(0 5 1k)".to_string(),
+            "R1 in out 1k".to_string(),
+            "C1 out 0 100n".to_string(),
+            ".tran 2.5e-6 5m".to_string(),
+            ".save all @c1[i] @r1[i]".to_string(),
+            ".end".to_string(),
+        ];
+        let res1 = engine.run_netlist(&netlist1);
+        assert!(res1.success, "sim1 failed: {:?} logs: {:?}", res1.error, res1.log);
+
+        let netlist2 = vec![
+            "* RC stage 2".to_string(),
+            "V1 in 0 SIN(0 5 1k)".to_string(),
+            "R1 in out 1k".to_string(),
+            "C1 out 0 100n".to_string(),
+            "R2 out n001 10k".to_string(),
+            "C2 n001 0 1u".to_string(),
+            ".tran 2.5e-6 5m".to_string(),
+            ".save all @c1[i] @c2[i] @r1[i] @r2[i]".to_string(),
+            ".end".to_string(),
+        ];
+        let res2 = engine.run_netlist(&netlist2);
+        assert!(res2.success, "sim2 failed: {:?} logs: {:?}", res2.error, res2.log);
+        let mut keys: Vec<String> = res2.traces.keys().cloned().collect();
+        keys.sort();
+        eprintln!("SIM2 TRACES: {:?}", keys);
+        eprintln!("SIM2 LOG: {:?}", res2.log);
+        assert!(res2.traces.contains_key("V(n001)"), "V(n001) missing! traces: {:?}", keys);
+        assert!(res2.traces.contains_key("I(c2)"), "I(c2) missing! traces: {:?}", keys);
+        assert!(res2.traces.contains_key("I(r2)"), "I(r2) missing! traces: {:?}", keys);
+
+        // Also test CLI path if `ngspice` is installed on PATH
+        if let Some(exe) = crate::settings::find_in_path("ngspice") {
+            let exe_s = exe.to_string_lossy().to_string();
+            let cli1 = run_ngspice_cli(&exe_s, &netlist1, &[]);
+            assert!(cli1.success, "cli1 failed: {:?} logs: {:?}", cli1.error, cli1.log);
+            let cli2 = run_ngspice_cli(&exe_s, &netlist2, &[]);
+            assert!(cli2.success, "cli2 failed: {:?} logs: {:?}", cli2.error, cli2.log);
+            assert!(
+                cli2.traces.contains_key("V(n001)"),
+                "CLI V(n001) missing! traces: {:?}",
+                cli2.traces.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                cli2.traces.contains_key("I(c2)"),
+                "CLI I(c2) missing! traces: {:?}",
+                cli2.traces.keys().collect::<Vec<_>>()
+            );
+            assert!(
+                cli2.traces.contains_key("I(r2)"),
+                "CLI I(r2) missing! traces: {:?}",
+                cli2.traces.keys().collect::<Vec<_>>()
+            );
+        }
     }
 }

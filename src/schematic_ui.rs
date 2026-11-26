@@ -1063,6 +1063,16 @@ pub fn draw_schematic_pane(
     action
 }
 
+fn lookup_trace_ci(sim: &SimulationResult, key: &str) -> Option<String> {
+    if sim.traces.contains_key(key) {
+        return Some(key.to_string());
+    }
+    sim.traces
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(key))
+        .cloned()
+}
+
 fn find_voltage_probe_target(
     gx: i32,
     gy: i32,
@@ -1070,12 +1080,12 @@ fn find_voltage_probe_target(
     netlist: &NetlistResult,
     sim: &SimulationResult,
 ) -> Option<String> {
-    // Check wire or net point -> V(net)
+    // Check wire or net point -> V(net) (case-insensitive to match ngspice lowercased nodes)
     if let Some(net) = netlist.point_to_net.get(&(gx, gy)) {
         if net != "0" {
             let key = format!("V({net})");
-            if sim.traces.contains_key(&key) {
-                return Some(key);
+            if let Some(found) = lookup_trace_ci(sim, &key) {
+                return Some(found);
             }
         }
     }
@@ -1083,8 +1093,8 @@ fn find_voltage_probe_target(
         if let Some(net) = netlist.wire_to_net.get(&wid) {
             if net != "0" {
                 let key = format!("V({net})");
-                if sim.traces.contains_key(&key) {
-                    return Some(key);
+                if let Some(found) = lookup_trace_ci(sim, &key) {
+                    return Some(found);
                 }
             }
         }
@@ -1180,8 +1190,8 @@ fn find_current_probe_target(
             candidates.push(format!("I(@{clean_low}[i])"));
 
             for key in candidates {
-                if sim.traces.contains_key(&key) {
-                    return Some(key);
+                if let Some(found) = lookup_trace_ci(sim, &key) {
+                    return Some(found);
                 }
             }
         }

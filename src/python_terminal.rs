@@ -218,7 +218,7 @@ impl Default for PythonTerminalState {
             lines: Vec::new(),
             sim_json_path: std::env::temp_dir().join(format!("mcp_itspice_py_sim_{pid}_{id}.json")),
             out_json_path: std::env::temp_dir().join(format!("mcp_itspice_py_out_{pid}_{id}.json")),
-            python_exe: "python3".to_string(),
+            python_exe: crate::settings::detect_python_path(),
             recording: false,
             recorded_commands: Vec::new(),
             loaded_script: None,
@@ -341,6 +341,11 @@ impl PythonTerminalState {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
 
         match cmd.spawn() {
             Ok(mut child) => {
