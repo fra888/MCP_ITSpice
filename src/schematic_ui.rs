@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
+use crate::hdl::HdlBlock;
 use crate::model::{
     component_pins_world, transform_offset, Component, ComponentKind, Directive, NetlistResult,
     Schematic, Wire, GRID_SIZE,
@@ -65,6 +66,7 @@ pub struct SchematicViewState {
     pub selected_directives: HashSet<u64>,
     pub clipboard: Option<ClipboardContent>,
     pub active_custom_symbol: Option<CustomSymbol>,
+    pub active_hdl_block: Option<HdlBlock>,
     pub cursor_grid: Option<(i32, i32)>,
     pub hovered_probe: Option<String>,
 }
@@ -86,6 +88,7 @@ impl Default for SchematicViewState {
             selected_directives: HashSet::new(),
             clipboard: None,
             active_custom_symbol: None,
+            active_hdl_block: None,
             cursor_grid: None,
             hovered_probe: None,
         }
@@ -502,6 +505,7 @@ pub fn draw_schematic_pane(
                     mirror: view.place_mirror,
                     params: Default::default(),
                     custom_symbol,
+                    hdl: None,
                     label_offset: None,
                     value_offset: None,
                 };
@@ -846,6 +850,9 @@ pub fn draw_schematic_pane(
                         c.rotation = view.place_rotation;
                         c.mirror = view.place_mirror;
                         c.custom_symbol = custom_sym;
+                        if kind == ComponentKind::Custom {
+                            c.hdl = view.active_hdl_block.clone();
+                        }
                     }
                     schematic.split_wires_for_component(id);
                     action = SchematicAction::Modified;

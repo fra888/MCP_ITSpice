@@ -16,6 +16,12 @@ A lightweight schematic capture and waveform viewer written in Rust (`egui`/`efr
 - **Symbol Workbench (`File -> New Symbol`)**:
   - Dedicated resizable workbench window for creating custom symbols with pins (preserving SPICE pin order), lines, rectangles, circles, and text.
   - Full `.asy` and `.sym.json` import/export, plus one-click placement onto the schematic.
+- **Verilog & VHDL Mixed-Signal Blocks (`HDL` Toolbar Button / Component Picker)**:
+  - Integrate synthesizable **Verilog (`.v`)** and **VHDL (`.vhd`)** digital blocks directly into analog SPICE schematics with auto-generated IC symbols (inputs on the left, outputs on the right, automatic vector bus expansion).
+  - **Built-in Zero-Dependency XSPICE Synthesizer**: Compiles combinational logic (`assign`, gate primitives, `always @(*)`, `when ... else`), sequential logic (`always @(posedge/negedge clk ...)`, `rising_edge`/`falling_edge`, async reset, counters, adders), and `case` FSMs directly into `ngspice` XSPICE digital subcircuits with sharp CMOS input buffers (`adc_bridge` + `dac_bridge`) for clean rail-to-rail CMOS outputs (`3.3V` / `5V` presets).
+  - **Custom Per-Port Thresholds & Analog Reference Pins**: Add one or more physical analog reference input pins along the bottom of the HDL symbol (or pick any schematic net) and assign per-port reference signals, input thresholds (`V_IL`/`V_IH`), and output logic levels (`V_low`/`V_high`).
+  - **Optional Verilator `d_cosim` Backend**: Automatically supported when `verilator` + `vlnggen` are installed on `PATH`.
+  - **Built-in Templates & Code Editor**: Resizable editor with scrollbars, live port/synthesis validation, `.v`/`.vhd` file load/save, and ready-to-use templates (*Logic Gate*, *2:1 Multiplexer*, *D Flip-Flop*, *4-bit Counter*, *Clock Divider*, and *4-State FSM Controller*). Double-click any placed HDL block to edit its code or electrical thresholds.
 - **Waveform Viewer & Split Views**:
   - Black (`#000000`) plot area with SI-formatted axes, dashed grid, multi-trace color legend, drag-box zoom, scroll-wheel zoom, and instantaneous hover readout.
   - **Separated Voltage, Current & Power Probing**:
@@ -146,7 +152,7 @@ MCP_ITSpice includes a built-in MCP server (`MCP_ITSpice`) that allows AI assist
 
 ### Exposed MCP Tools
 - `get_schematic`, `new_schematic`, `load_schematic`, `save_schematic`
-- `add_component`, `edit_component`, `remove_component`, `add_wire`, `set_directive`
+- `add_component`, `add_hdl_block`, `edit_component`, `remove_component`, `add_wire`, `set_directive`
 - `run_simulation`, `run_spice_netlist`, `get_trace`
 - `python_exec`, `python_run_script`, `get_python_output` (connected to the persistent Python analysis session with live GUI waveform/plot sync)
 
@@ -161,6 +167,8 @@ MCP_ITSpice includes a built-in MCP server (`MCP_ITSpice`) that allows AI assist
 - `src/waveform_ui.rs` — Black-background waveform plotter with dual Y-axes, multi-graph panes, fixed cursors, `Δt` readout, and SI formatting
 - `src/python_terminal.rs` — Interactive system Python (`python3`) analysis REPL tab with simulation sync and `plot()` / `new_plot()` waveform export
 - `src/symbol_editor.rs` — Resizable Symbol Workbench with `.asy` / `.sym.json` support
+- `src/hdl.rs` — Verilog & VHDL parser, built-in XSPICE synthesizer (combinational, sequential, `case` FSMs, CMOS ADC/DAC bridges), Verilator `d_cosim` backend, and auto-generated IC symbols
+- `src/hdl_dialog.rs` — Resizable Verilog/VHDL block editor modal with templates, file load/save, live port/synthesis preview, and logic-level presets
 - `src/source_dialog.rs` — Independent Voltage/Current Source configuration dialog
 - `src/capacitor_dialog.rs` — Capacitor Properties dialog and ngspice library/parametric configuration
 - `src/resistor_dialog.rs` — Resistor Properties dialog and ngspice library/parametric configuration

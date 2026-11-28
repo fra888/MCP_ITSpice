@@ -331,6 +331,110 @@ impl McpServer {
                 st.notify_gui();
                 (json!({ "wire_ids": ids }).to_string(), false)
             }
+            "add_hdl_block" => {
+                let lang_str = args
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("verilog");
+                let language = if lang_str.eq_ignore_ascii_case("vhdl") {
+                    crate::hdl::HdlLanguage::Vhdl
+                } else {
+                    crate::hdl::HdlLanguage::Verilog
+                };
+                let Some(source) = args.get("source").and_then(|v| v.as_str()) else {
+                    return ("Missing required argument: source".into(), true);
+                };
+                let x = args.get("x").and_then(|v| v.as_i64()).unwrap_or(20) as i32;
+                let y = args.get("y").and_then(|v| v.as_i64()).unwrap_or(12) as i32;
+                let mut block = crate::hdl::HdlBlock::default();
+                block.language = language;
+                block.source = source.to_string();
+                if let Some(vl) = args.get("v_low").and_then(|v| v.as_f64()) {
+                    block.v_low = vl;
+                }
+                if let Some(vh) = args.get("v_high").and_then(|v| v.as_f64()) {
+                    block.v_high = vh;
+                }
+                if let Some(vil) = args.get("v_thresh_low").and_then(|v| v.as_f64()) {
+                    block.v_thresh_low = vil;
+                }
+                if let Some(vih) = args.get("v_thresh_high").and_then(|v| v.as_f64()) {
+                    block.v_thresh_high = vih;
+                }
+                if let Some(rpins) = args.get("ref_pins").and_then(|v| v.as_array()) {
+                    for rp in rpins {
+                        if let Some(s) = rp.as_str() {
+                            let t = s.trim();
+                            if !t.is_empty()
+                                && !block.ref_pins.iter().any(|x| x.eq_ignore_ascii_case(t))
+                            {
+                                block.ref_pins.push(t.to_string());
+                            }
+                        }
+                    }
+                }
+                if let Some(cfgs) = args.get("port_configs").and_then(|v| v.as_object()) {
+                    for (pname, pval) in cfgs {
+                        if let Some(obj) = pval.as_object() {
+                            let cfg = crate::hdl::HdlPortConfig {
+                                ref_net: obj
+                                    .get("ref_net")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                v_thresh_low: obj.get("v_thresh_low").and_then(|v| v.as_f64()),
+                                v_thresh_high: obj.get("v_thresh_high").and_then(|v| v.as_f64()),
+                                v_low: obj.get("v_low").and_then(|v| v.as_f64()),
+                                v_high: obj.get("v_high").and_then(|v| v.as_f64()),
+                            };
+                            if !cfg.is_default() {
+                                block.port_configs.insert(pname.clone(), cfg);
+                            }
+                        }
+                    }
+                }
+                if let Err(e) = crate::hdl::parse_hdl(language, source) {
+                    return (format!("HDL parse error: {e}"), true);
+                }
+                block.refresh_metadata();
+                if let Err(e) = block.synthesize_subckt("HDL_CHECK") {
+                    return (format!("HDL synthesis error: {e}"), true);
+                }
+                let sym = block.build_symbol();
+                let refdes = args
+                    .get("refdes")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| st.schematic.next_refdes(ComponentKind::OpAmp));
+                let id = st.schematic.add_component(
+                    ComponentKind::Custom,
+                    refdes.clone(),
+                    block.module_name.clone(),
+                    x,
+                    y,
+                );
+                let pin_coords: Vec<Value> = {
+                    let c = st.schematic.components.iter_mut().find(|c| c.id == id).unwrap();
+                    c.custom_symbol = Some(sym);
+                    c.hdl = Some(block.clone());
+                    crate::model::component_pins_world(c)
+                        .into_iter()
+                        .map(|(name, px, py)| json!({ "name": name, "x": px, "y": py }))
+                        .collect()
+                };
+                st.notify_gui();
+                (
+                    json!({
+                        "id": id,
+                        "refdes": refdes,
+                        "module": block.module_name,
+                        "language": block.language.label(),
+                        "pins": pin_coords
+                    })
+                    .to_string(),
+                    false,
+                )
+            }
             "set_directive" => {
                 let Some(text) = args.get("text").and_then(|v| v.as_str()) else {
                     return ("Missing required argument: text".into(), true);
@@ -753,6 +857,25 @@ fn tool_definitions() -> Value {
                     "path": { "type": "string", "description": "Path to the .py script file" }
                 },
                 "required": ["path"]
+            }
+        },
+        {
+            "name": "add_hdl_block",
+            "description": "Add a synthesizable Verilog or VHDL digital/mixed-signal block to the schematic with auto-generated IC symbol and XSPICE ADC/DAC bridges. Returns the component id and world pin coordinates.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "language": { "type": "string", "enum": ["verilog", "vhdl"], "description": "HDL language (default: verilog)" },
+                    "source": { "type": "string", "description": "Full Verilog module or VHDL entity+architecture source code" },
+                    "refdes": { "type": "string", "description": "Optional reference designator (e.g. U1)" },
+                    "x": { "type": "integer", "description": "Grid X coordinate" },
+                    "y": { "type": "integer", "description": "Grid Y coordinate" },
+                    "v_low": { "type": "number", "description": "Logic 0 output voltage in Volts (default 0.0)" },
+                    "v_high": { "type": "number", "description": "Logic 1 output voltage in Volts (default 5.0)" },
+                    "v_thresh_low": { "type": "number", "description": "Input low threshold V_IL in Volts (default 1.5)" },
+                    "v_thresh_high": { "type": "number", "description": "Input high threshold V_IH in Volts (default 3.5)" }
+                },
+                "required": ["source"]
             }
         },
         {

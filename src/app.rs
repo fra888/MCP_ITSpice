@@ -8,6 +8,7 @@ use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
 use crate::analysis_dialog::AnalysisDialogState;
 use crate::capacitor_dialog::{CapacitorDialogAction, CapacitorDialogState};
+use crate::hdl_dialog::{HdlDialogAction, HdlDialogState};
 use crate::icons::{icon_button, ToolbarIcon};
 use crate::mcp::McpSharedState;
 use crate::model::{ComponentKind, NetlistResult, Schematic};
@@ -93,6 +94,7 @@ pub struct ItSpiceApp {
     settings: AppSettings,
     model_index: ModelIndex,
     symbol_editor: SymbolEditorState,
+    hdl_dialog: HdlDialogState,
     custom_symbols: Vec<CustomSymbol>,
     new_default_dir_input: String,
     new_user_dir_input: String,
@@ -151,6 +153,7 @@ impl ItSpiceApp {
             settings,
             model_index,
             symbol_editor: SymbolEditorState::default(),
+            hdl_dialog: HdlDialogState::default(),
             custom_symbols: Vec::new(),
             new_default_dir_input: String::new(),
             new_user_dir_input: String::new(),
@@ -803,6 +806,13 @@ impl eframe::App for ItSpiceApp {
                 ) {
                     self.show_component_picker = true;
                 }
+                if ui
+                    .selectable_label(self.hdl_dialog.open, "HDL")
+                    .on_hover_text("Insert Verilog / VHDL Block")
+                    .clicked()
+                {
+                    self.hdl_dialog.open_new();
+                }
                 if icon_button(
                     ui,
                     ToolbarIcon::Directive,
@@ -1338,6 +1348,8 @@ impl ItSpiceApp {
                             c.kind == ComponentKind::Pmos,
                             &c.params,
                         ));
+                    } else if let Some(hdl_blk) = &c.hdl {
+                        self.hdl_dialog.open_existing(id, &c.refdes, hdl_blk);
                     } else {
                         self.edit_modal = Some(EditModal::Component {
                             id,
@@ -1709,12 +1721,18 @@ impl ItSpiceApp {
                             self.show_component_picker = false;
                         }
                     }
+                    ui.separator();
+                    if ui.button("Verilog / VHDL Block...").clicked() {
+                        self.hdl_dialog.open_new();
+                        self.show_component_picker = false;
+                    }
                     if !self.custom_symbols.is_empty() {
                         ui.separator();
                         ui.strong("Custom Symbols");
                         for sym in self.custom_symbols.clone() {
                             if ui.button(&sym.name).clicked() {
                                 self.schematic_view.active_custom_symbol = Some(sym);
+                                self.schematic_view.active_hdl_block = None;
                                 self.tool = EditorTool::Place(ComponentKind::Custom);
                                 self.show_component_picker = false;
                             }
@@ -1786,8 +1804,56 @@ impl ItSpiceApp {
                     self.custom_symbols.push(sym.clone());
                 }
                 self.schematic_view.active_custom_symbol = Some(sym);
+                self.schematic_view.active_hdl_block = None;
                 self.tool = EditorTool::Place(ComponentKind::Custom);
                 self.status_msg = "Click on schematic to place custom symbol".into();
+            }
+        }
+
+        // Verilog / VHDL Block Editor Window
+        let mut available_nets: Vec<String> = self
+            .netlist
+            .point_to_net
+            .values()
+            .filter(|n| *n != "0")
+            .cloned()
+            .collect();
+        available_nets.sort();
+        available_nets.dedup();
+        match self.hdl_dialog.show(ctx, &available_nets) {
+            HdlDialogAction::None => {}
+            HdlDialogAction::PlaceNew(block) => {
+                let sym = block.build_symbol();
+                self.status_msg = format!(
+                    "Click on schematic to place {} block '{}'",
+                    block.language.label(),
+                    block.module_name
+                );
+                self.schematic_view.active_custom_symbol = Some(sym);
+                self.schematic_view.active_hdl_block = Some(block);
+                self.tool = EditorTool::Place(ComponentKind::Custom);
+            }
+            HdlDialogAction::UpdateExisting {
+                comp_id,
+                refdes,
+                block,
+            } => {
+                self.undo_stack.push(self.schematic.clone());
+                if let Some(c) = self
+                    .schematic
+                    .components
+                    .iter_mut()
+                    .find(|c| c.id == comp_id)
+                {
+                    if !refdes.trim().is_empty() {
+                        c.refdes = refdes.trim().to_string();
+                    }
+                    c.value = block.module_name.clone();
+                    c.custom_symbol = Some(block.build_symbol());
+                    c.hdl = Some(block);
+                }
+                self.refresh_netlist();
+                self.status_msg = "Updated HDL block — click Run (▶) to re-simulate".into();
             }
         }
 

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::hdl::HdlBlock;
 use crate::settings::ModelIndex;
 use crate::symbol_editor::CustomSymbol;
 
@@ -102,6 +103,8 @@ pub struct Component {
     pub params: HashMap<String, String>,
     #[serde(default)]
     pub custom_symbol: Option<CustomSymbol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdl: Option<HdlBlock>,
     #[serde(default)]
     pub label_offset: Option<(f32, f32)>,
     #[serde(default)]
@@ -314,6 +317,7 @@ impl Schematic {
             mirror: false,
             params: HashMap::new(),
             custom_symbol: None,
+            hdl: None,
             label_offset: None,
             value_offset: None,
         });
@@ -786,30 +790,54 @@ impl Schematic {
                     ));
                 }
                 ComponentKind::Custom => {
-                    let prefix_ch = c
-                        .custom_symbol
-                        .as_ref()
-                        .and_then(|s| s.prefix.chars().next())
-                        .unwrap_or('X');
-                    let name = ensure_prefix(ref_clean, prefix_ch);
-                    comp_spice_names.insert(c.id, name.clone());
-                    let model_or_subckt = if val_spice.is_empty() {
-                        c.custom_symbol
-                            .as_ref()
-                            .map(|s| s.default_value.clone())
-                            .unwrap_or_else(|| "CUSTOM".into())
+                    if let Some(hdl_blk) = &c.hdl {
+                        let name = ensure_prefix(ref_clean, 'X');
+                        let sub_name = format!("ITSPICE_HDL_{}", c.id);
+                        comp_spice_names.insert(c.id, name.clone());
+                        let mut sensed_nets = Vec::with_capacity(pin_nets.len());
+                        for (idx, pnet) in pin_nets.iter().enumerate() {
+                            let pnum = idx + 1;
+                            let snode = format!("_isense_p{pnum}_{name}");
+                            lines.push(format!("V_sense_p{pnum}_{name} {pnet} {snode} 0"));
+                            sensed_nets.push(snode);
+                        }
+                        for rnet in hdl_blk.extra_ref_nets() {
+                            sensed_nets.push(rnet);
+                        }
+                        lines.push(format!("{name} {} {sub_name}", sensed_nets.join(" ")));
+                        match hdl_blk.synthesize_subckt(&sub_name) {
+                            Ok(sub_lines) => lines.extend(sub_lines),
+                            Err(e) => warnings.push(format!(
+                                "HDL synthesis failed for '{}' ({}): {e}",
+                                c.refdes, hdl_blk.module_name
+                            )),
+                        }
                     } else {
-                        val_spice
-                    };
-                    used_models.insert(format!("SUBCKT:{model_or_subckt}"));
-                    let mut sensed_nets = Vec::with_capacity(pin_nets.len());
-                    for (idx, pnet) in pin_nets.iter().enumerate() {
-                        let pnum = idx + 1;
-                        let snode = format!("_isense_p{pnum}_{name}");
-                        lines.push(format!("V_sense_p{pnum}_{name} {pnet} {snode} 0"));
-                        sensed_nets.push(snode);
+                        let prefix_ch = c
+                            .custom_symbol
+                            .as_ref()
+                            .and_then(|s| s.prefix.chars().next())
+                            .unwrap_or('X');
+                        let name = ensure_prefix(ref_clean, prefix_ch);
+                        comp_spice_names.insert(c.id, name.clone());
+                        let model_or_subckt = if val_spice.is_empty() {
+                            c.custom_symbol
+                                .as_ref()
+                                .map(|s| s.default_value.clone())
+                                .unwrap_or_else(|| "CUSTOM".into())
+                        } else {
+                            val_spice
+                        };
+                        used_models.insert(format!("SUBCKT:{model_or_subckt}"));
+                        let mut sensed_nets = Vec::with_capacity(pin_nets.len());
+                        for (idx, pnet) in pin_nets.iter().enumerate() {
+                            let pnum = idx + 1;
+                            let snode = format!("_isense_p{pnum}_{name}");
+                            lines.push(format!("V_sense_p{pnum}_{name} {pnet} {snode} 0"));
+                            sensed_nets.push(snode);
+                        }
+                        lines.push(format!("{name} {} {model_or_subckt}", sensed_nets.join(" ")));
                     }
-                    lines.push(format!("{name} {} {model_or_subckt}", sensed_nets.join(" ")));
                 }
                 ComponentKind::Ground | ComponentKind::NetLabel => {}
             }

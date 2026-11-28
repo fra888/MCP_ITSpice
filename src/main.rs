@@ -1,6 +1,8 @@
 mod analysis_dialog;
 mod app;
 mod capacitor_dialog;
+mod hdl;
+mod hdl_dialog;
 mod icons;
 mod mcp;
 mod model;
