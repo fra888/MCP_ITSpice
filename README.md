@@ -152,7 +152,7 @@ MCP_ITSpice includes a built-in MCP server (`MCP_ITSpice`) that allows AI assist
 
 ### Exposed MCP Tools
 - `get_schematic`, `new_schematic`, `load_schematic`, `save_schematic`
-- `add_component`, `add_hdl_block`, `edit_component`, `remove_component`, `add_wire`, `set_directive`
+- `add_component`, `add_hdl_block`, `edit_hdl_block`, `edit_component`, `remove_component`, `add_wire`, `set_directive`
 - `run_simulation`, `run_spice_netlist`, `get_trace`
 - `python_exec`, `python_run_script`, `get_python_output` (connected to the persistent Python analysis session with live GUI waveform/plot sync)
 

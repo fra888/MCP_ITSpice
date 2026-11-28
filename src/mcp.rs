@@ -361,6 +361,12 @@ impl McpServer {
                 if let Some(vih) = args.get("v_thresh_high").and_then(|v| v.as_f64()) {
                     block.v_thresh_high = vih;
                 }
+                if let Some(tr) = args.get("t_rise").and_then(|v| v.as_str()) {
+                    block.t_rise = tr.to_string();
+                }
+                if let Some(tf) = args.get("t_fall").and_then(|v| v.as_str()) {
+                    block.t_fall = tf.to_string();
+                }
                 if let Some(rpins) = args.get("ref_pins").and_then(|v| v.as_array()) {
                     for rp in rpins {
                         if let Some(s) = rp.as_str() {
@@ -397,6 +403,11 @@ impl McpServer {
                     return (format!("HDL parse error: {e}"), true);
                 }
                 block.refresh_metadata();
+                if let Some(asy) = args.get("symbol_asy").and_then(|v| v.as_str()) {
+                    let mut loaded = crate::symbol_editor::CustomSymbol::from_asy(&block.module_name, asy);
+                    block.sync_symbol_pins(&mut loaded);
+                    block.custom_symbol_override = Some(loaded);
+                }
                 if let Err(e) = block.synthesize_subckt("HDL_CHECK") {
                     return (format!("HDL synthesis error: {e}"), true);
                 }
@@ -427,6 +438,119 @@ impl McpServer {
                     json!({
                         "id": id,
                         "refdes": refdes,
+                        "module": block.module_name,
+                        "language": block.language.label(),
+                        "pins": pin_coords
+                    })
+                    .to_string(),
+                    false,
+                )
+            }
+            "edit_hdl_block" => {
+                let target_id = args.get("id").and_then(|v| v.as_u64());
+                let target_ref = args.get("refdes").and_then(|v| v.as_str());
+                let Some(comp_idx) = st.schematic.components.iter().position(|c| {
+                    c.hdl.is_some()
+                        && (target_id.map(|id| c.id == id).unwrap_or(false)
+                            || target_ref
+                                .map(|r| c.refdes.eq_ignore_ascii_case(r))
+                                .unwrap_or(false))
+                }) else {
+                    return ("HDL block not found (provide id or refdes)".into(), true);
+                };
+
+                let mut block = st.schematic.components[comp_idx].hdl.clone().unwrap();
+                if let Some(lang_str) = args.get("language").and_then(|v| v.as_str()) {
+                    block.language = if lang_str.eq_ignore_ascii_case("vhdl") {
+                        crate::hdl::HdlLanguage::Vhdl
+                    } else {
+                        crate::hdl::HdlLanguage::Verilog
+                    };
+                }
+                if let Some(source) = args.get("source").and_then(|v| v.as_str()) {
+                    block.source = source.to_string();
+                }
+                if let Some(vl) = args.get("v_low").and_then(|v| v.as_f64()) {
+                    block.v_low = vl;
+                }
+                if let Some(vh) = args.get("v_high").and_then(|v| v.as_f64()) {
+                    block.v_high = vh;
+                }
+                if let Some(vil) = args.get("v_thresh_low").and_then(|v| v.as_f64()) {
+                    block.v_thresh_low = vil;
+                }
+                if let Some(vih) = args.get("v_thresh_high").and_then(|v| v.as_f64()) {
+                    block.v_thresh_high = vih;
+                }
+                if let Some(tr) = args.get("t_rise").and_then(|v| v.as_str()) {
+                    block.t_rise = tr.to_string();
+                }
+                if let Some(tf) = args.get("t_fall").and_then(|v| v.as_str()) {
+                    block.t_fall = tf.to_string();
+                }
+                if let Some(rpins) = args.get("ref_pins").and_then(|v| v.as_array()) {
+                    block.ref_pins.clear();
+                    for rp in rpins {
+                        if let Some(s) = rp.as_str() {
+                            let t = s.trim();
+                            if !t.is_empty()
+                                && !block.ref_pins.iter().any(|x| x.eq_ignore_ascii_case(t))
+                            {
+                                block.ref_pins.push(t.to_string());
+                            }
+                        }
+                    }
+                }
+                if let Some(cfgs) = args.get("port_configs").and_then(|v| v.as_object()) {
+                    block.port_configs.clear();
+                    for (pname, pval) in cfgs {
+                        if let Some(obj) = pval.as_object() {
+                            let cfg = crate::hdl::HdlPortConfig {
+                                ref_net: obj
+                                    .get("ref_net")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                v_thresh_low: obj.get("v_thresh_low").and_then(|v| v.as_f64()),
+                                v_thresh_high: obj.get("v_thresh_high").and_then(|v| v.as_f64()),
+                                v_low: obj.get("v_low").and_then(|v| v.as_f64()),
+                                v_high: obj.get("v_high").and_then(|v| v.as_f64()),
+                            };
+                            if !cfg.is_default() {
+                                block.port_configs.insert(pname.clone(), cfg);
+                            }
+                        }
+                    }
+                }
+                if let Err(e) = crate::hdl::parse_hdl(block.language, &block.source) {
+                    return (format!("HDL parse error: {e}"), true);
+                }
+                block.refresh_metadata();
+                if let Some(asy) = args.get("symbol_asy").and_then(|v| v.as_str()) {
+                    let mut loaded =
+                        crate::symbol_editor::CustomSymbol::from_asy(&block.module_name, asy);
+                    block.sync_symbol_pins(&mut loaded);
+                    block.custom_symbol_override = Some(loaded);
+                }
+                if let Err(e) = block.synthesize_subckt("HDL_CHECK") {
+                    return (format!("HDL synthesis error: {e}"), true);
+                }
+                let sym = block.build_symbol();
+                let c = &mut st.schematic.components[comp_idx];
+                c.value = block.module_name.clone();
+                c.custom_symbol = Some(sym);
+                c.hdl = Some(block.clone());
+                let cid = c.id;
+                let cref = c.refdes.clone();
+                let pin_coords: Vec<Value> = crate::model::component_pins_world(c)
+                    .into_iter()
+                    .map(|(name, px, py)| json!({ "name": name, "x": px, "y": py }))
+                    .collect();
+                st.notify_gui();
+                (
+                    json!({
+                        "id": cid,
+                        "refdes": cref,
                         "module": block.module_name,
                         "language": block.language.label(),
                         "pins": pin_coords
@@ -861,7 +985,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "add_hdl_block",
-            "description": "Add a synthesizable Verilog or VHDL digital/mixed-signal block to the schematic with auto-generated IC symbol and XSPICE ADC/DAC bridges. Returns the component id and world pin coordinates.",
+            "description": "Add a synthesizable Verilog or VHDL digital/mixed-signal block to the schematic with auto-generated (or custom .asy) IC symbol, optional wired analog reference pins, and per-port thresholds/reference nets. Returns the component id and world pin coordinates.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -870,12 +994,46 @@ fn tool_definitions() -> Value {
                     "refdes": { "type": "string", "description": "Optional reference designator (e.g. U1)" },
                     "x": { "type": "integer", "description": "Grid X coordinate" },
                     "y": { "type": "integer", "description": "Grid Y coordinate" },
-                    "v_low": { "type": "number", "description": "Logic 0 output voltage in Volts (default 0.0)" },
-                    "v_high": { "type": "number", "description": "Logic 1 output voltage in Volts (default 5.0)" },
-                    "v_thresh_low": { "type": "number", "description": "Input low threshold V_IL in Volts (default 1.5)" },
-                    "v_thresh_high": { "type": "number", "description": "Input high threshold V_IH in Volts (default 3.5)" }
+                    "v_low": { "type": "number", "description": "Default logic 0 output voltage in Volts (default 0.0)" },
+                    "v_high": { "type": "number", "description": "Default logic 1 output voltage in Volts (default 5.0)" },
+                    "v_thresh_low": { "type": "number", "description": "Default input low threshold V_IL in Volts (default 1.5)" },
+                    "v_thresh_high": { "type": "number", "description": "Default input high threshold V_IH in Volts (default 3.5)" },
+                    "t_rise": { "type": "string", "description": "Output rise time (default '5n')" },
+                    "t_fall": { "type": "string", "description": "Output fall time (default '5n')" },
+                    "ref_pins": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of physical analog reference input pin names added to the bottom of the symbol (e.g. ['REF1', 'VSS'])"
+                    },
+                    "port_configs": {
+                        "type": "object",
+                        "description": "Optional map of port_name -> { ref_net, v_thresh_low, v_thresh_high, v_low, v_high } for per-port reference pin/net and threshold/level overrides"
+                    },
+                    "symbol_asy": { "type": "string", "description": "Optional LTspice .asy symbol text to customize the block's appearance" }
                 },
                 "required": ["source"]
+            }
+        },
+        {
+            "name": "edit_hdl_block",
+            "description": "Modify an existing Verilog/VHDL block on the schematic (source code, thresholds, analog ref_pins, per-port port_configs, or custom .asy symbol).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Component ID of the HDL block" },
+                    "refdes": { "type": "string", "description": "Reference designator of the HDL block (e.g. U1)" },
+                    "language": { "type": "string", "enum": ["verilog", "vhdl"] },
+                    "source": { "type": "string" },
+                    "v_low": { "type": "number" },
+                    "v_high": { "type": "number" },
+                    "v_thresh_low": { "type": "number" },
+                    "v_thresh_high": { "type": "number" },
+                    "t_rise": { "type": "string" },
+                    "t_fall": { "type": "string" },
+                    "ref_pins": { "type": "array", "items": { "type": "string" } },
+                    "port_configs": { "type": "object" },
+                    "symbol_asy": { "type": "string" }
+                }
             }
         },
         {

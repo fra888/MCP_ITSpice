@@ -172,6 +172,9 @@ pub struct HdlBlock {
     /// Physical analog reference input pins drawn on the bottom of the HDL symbol
     #[serde(default)]
     pub ref_pins: Vec<String>,
+    /// Optional user-customized symbol (overrides auto-generated IC box)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_symbol_override: Option<CustomSymbol>,
 }
 
 fn default_v_low() -> f64 {
@@ -207,6 +210,7 @@ impl Default for HdlBlock {
             backend: HdlBackend::Auto,
             port_configs: HashMap::new(),
             ref_pins: Vec::new(),
+            custom_symbol_override: None,
         };
         b.refresh_metadata();
         b
@@ -296,8 +300,73 @@ impl HdlBlock {
         out
     }
 
-    /// Generate a clean IC-style schematic symbol for this HDL block.
+    /// Return the custom symbol override (synced with current pins) if present,
+    /// otherwise auto-generate the default IC-style symbol.
     pub fn build_symbol(&self) -> CustomSymbol {
+        if let Some(mut sym) = self.custom_symbol_override.clone() {
+            sym.name = self.module_name.clone();
+            sym.default_value = self.module_name.clone();
+            self.sync_symbol_pins(&mut sym);
+            return sym;
+        }
+        self.build_default_symbol()
+    }
+
+    /// Expected ordered pin list matching the synthesized `.subckt` header:
+    /// `[digital_inputs..., digital_outputs..., wired_ref_pins...]`.
+    pub fn expected_symbol_pin_names(&self) -> Vec<String> {
+        let mut left_pins: Vec<String> = Vec::new();
+        let mut right_pins: Vec<String> = Vec::new();
+        for p in &self.ports {
+            let names = p.expanded_pin_names();
+            match p.dir {
+                HdlPortDir::Input => left_pins.extend(names),
+                HdlPortDir::Output | HdlPortDir::Inout => right_pins.extend(names),
+            }
+        }
+        let mut all = left_pins;
+        all.extend(right_pins);
+        all.extend(self.ref_pins.iter().cloned());
+        all
+    }
+
+    /// Synchronize a custom symbol's pins with the block's current ports & ref_pins,
+    /// preserving custom `(x, y)` positions for pins whose names still exist.
+    pub fn sync_symbol_pins(&self, sym: &mut CustomSymbol) {
+        let expected = self.expected_symbol_pin_names();
+        let default_sym = self.build_default_symbol();
+        let old_positions: HashMap<String, (i32, i32)> = sym
+            .pins
+            .iter()
+            .map(|p| (p.name.clone(), (p.x, p.y)))
+            .collect();
+        let def_positions: HashMap<String, (i32, i32)> = default_sym
+            .pins
+            .iter()
+            .map(|p| (p.name.clone(), (p.x, p.y)))
+            .collect();
+
+        sym.pins = expected
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let (x, y) = old_positions
+                    .get(&name)
+                    .or_else(|| def_positions.get(&name))
+                    .copied()
+                    .unwrap_or((0, i as i32 * 2));
+                SymbolPin {
+                    name,
+                    order: i + 1,
+                    x,
+                    y,
+                }
+            })
+            .collect();
+    }
+
+    /// Generate the default IC-style schematic symbol for this HDL block.
+    pub fn build_default_symbol(&self) -> CustomSymbol {
         let mut left_pins: Vec<String> = Vec::new();
         let mut right_pins: Vec<String> = Vec::new();
         for p in &self.ports {

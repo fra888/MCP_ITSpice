@@ -430,8 +430,9 @@ pub fn draw_schematic_pane(
     let mut text_hitboxes: Vec<(u64, bool, Rect)> = Vec::new();
     for c in &schematic.components {
         if view.selected_components.contains(&c.id) {
-            let p_min = to_screen((c.x - 2) as f32, (c.y - 2) as f32, view);
-            let p_max = to_screen((c.x + 2) as f32, (c.y + 2) as f32, view);
+            let (min_x, min_y, max_x, max_y) = component_bounds_world(c);
+            let p_min = to_screen(min_x, min_y, view);
+            let p_max = to_screen(max_x, max_y, view);
             let sel_r = Rect::from_two_pos(p_min, p_max);
             painter.rect_filled(sel_r, 2.0, sel_box_fill);
             painter.rect_stroke(sel_r, 2.0, sel_box_stroke);
@@ -732,8 +733,12 @@ pub fn draw_schematic_pane(
                             view.clear_selection();
                         }
                         for c in &schematic.components {
-                            let p = to_screen(c.x as f32, c.y as f32, view);
-                            if box_rect.contains(p) {
+                            let (min_x, min_y, max_x, max_y) = component_bounds_world(c);
+                            let c_rect = Rect::from_two_pos(
+                                to_screen(min_x, min_y, view),
+                                to_screen(max_x, max_y, view),
+                            );
+                            if box_rect.intersects(c_rect) {
                                 view.selected_components.insert(c.id);
                             }
                         }
@@ -820,7 +825,7 @@ pub fn draw_schematic_pane(
                                 schematic.add_wire(sx, sy, gx, gy);
                             }
                             schematic.split_wires_for_all_components();
-                            view.wire_start = Some((gx, gy));
+                            view.wire_start = None;
                             action = SchematicAction::Modified;
                         } else {
                             view.wire_start = None;
@@ -1244,9 +1249,93 @@ fn find_power_probe_target(
     }
 }
 
+fn component_bounds_world(c: &Component) -> (f32, f32, f32, f32) {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    let mut expand = |x: f32, y: f32| {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    };
+
+    for (_, px, py) in component_pins_world(c) {
+        expand(px as f32, py as f32);
+    }
+
+    match c.kind {
+        ComponentKind::Custom => {
+            if let Some(sym) = &c.custom_symbol {
+                let mut add_local = |lx: f32, ly: f32| {
+                    let (rx, ry) = transform_f(lx, ly, c.rotation, c.mirror);
+                    expand(c.x as f32 + rx, c.y as f32 + ry);
+                };
+                for s in &sym.shapes {
+                    match s {
+                        SymbolShape::Line { x1, y1, x2, y2 }
+                        | SymbolShape::Rect { x1, y1, x2, y2 } => {
+                            add_local(*x1, *y1);
+                            add_local(*x2, *y2);
+                        }
+                        SymbolShape::Circle { cx, cy, r } => {
+                            add_local(*cx - *r, *cy - *r);
+                            add_local(*cx + *r, *cy + *r);
+                        }
+                        SymbolShape::Text { x, y, .. } => {
+                            add_local(*x, *y);
+                        }
+                    }
+                }
+            }
+            if !min_x.is_finite() {
+                return (c.x as f32 - 2.0, c.y as f32 - 2.0, c.x as f32 + 2.0, c.y as f32 + 2.0);
+            }
+            return (min_x - 0.5, min_y - 0.5, max_x + 0.5, max_y + 0.5);
+        }
+        ComponentKind::Ground => {
+            let (rx, ry) = transform_f(0.0, 1.2, c.rotation, c.mirror);
+            expand(c.x as f32 + rx, c.y as f32 + ry);
+            expand(c.x as f32 - 0.8, c.y as f32);
+            expand(c.x as f32 + 0.8, c.y as f32);
+            return (min_x - 0.3, min_y - 0.3, max_x + 0.3, max_y + 0.3);
+        }
+        ComponentKind::NetLabel => {
+            return (c.x as f32 - 0.9, c.y as f32 - 1.1, c.x as f32 + 0.9, c.y as f32 + 0.4);
+        }
+        ComponentKind::VoltageSource | ComponentKind::CurrentSource => {
+            expand(c.x as f32 - 1.4, c.y as f32 - 2.0);
+            expand(c.x as f32 + 1.4, c.y as f32 + 2.0);
+        }
+        ComponentKind::Resistor
+        | ComponentKind::Capacitor
+        | ComponentKind::Inductor
+        | ComponentKind::Diode => {
+            let (hx, hy) = transform_f(0.9, 2.0, c.rotation, c.mirror);
+            let (hx2, hy2) = transform_f(-0.9, -2.0, c.rotation, c.mirror);
+            expand(c.x as f32 + hx, c.y as f32 + hy);
+            expand(c.x as f32 + hx2, c.y as f32 + hy2);
+        }
+        ComponentKind::Nmos
+        | ComponentKind::Pmos
+        | ComponentKind::Npn
+        | ComponentKind::Pnp
+        | ComponentKind::OpAmp => {
+            expand(c.x as f32 - 2.0, c.y as f32 - 2.0);
+            expand(c.x as f32 + 2.0, c.y as f32 + 2.0);
+        }
+    }
+
+    (min_x - 0.4, min_y - 0.4, max_x + 0.4, max_y + 0.4)
+}
+
 fn hit_test_component(gx: i32, gy: i32, schematic: &Schematic) -> Option<u64> {
+    let fx = gx as f32;
+    let fy = gy as f32;
     for c in &schematic.components {
-        if (c.x - gx).abs() <= 2 && (c.y - gy).abs() <= 2 {
+        let (min_x, min_y, max_x, max_y) = component_bounds_world(c);
+        if fx >= min_x && fx <= max_x && fy >= min_y && fy <= max_y {
             return Some(c.id);
         }
     }
